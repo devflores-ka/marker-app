@@ -4,11 +4,14 @@ import {
   Box, Grid, Card, CardContent, CardActions, Typography, Button,
   TextField, Dialog, DialogTitle, DialogContent, DialogActions,
   List, ListItem, ListItemText, ListItemSecondaryAction,
-  IconButton, Alert, Chip, Fab, Tooltip
+  IconButton, Alert, Chip, Fab, Tooltip, LinearProgress,
+  Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
+  Paper, Collapse, Avatar
 } from '@mui/material';
 import {
   Add, FolderOpen, Upload, Science, TableChart,
-  Delete, Edit, Visibility, Download
+  Delete, Edit, Visibility, Download, ExpandMore, ExpandLess,
+  CheckCircle, Error, Pending, Analytics, Settings
 } from '@mui/icons-material';
 
 const Dashboard = () => {
@@ -16,6 +19,7 @@ const Dashboard = () => {
   const [projects, setProjects] = useState([]);
   const [currentProject, setCurrentProject] = useState(null);
   const [samples, setSamples] = useState([]);
+  const [projectStats, setProjectStats] = useState({});
   const [backendStatus, setBackendStatus] = useState('checking...');
   
   // Estados para modales
@@ -23,6 +27,12 @@ const Dashboard = () => {
   const [uploadFilesOpen, setUploadFilesOpen] = useState(false);
   const [projectName, setProjectName] = useState('');
   const [selectedFiles, setSelectedFiles] = useState([]);
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  
+  // Estados para detalles
+  const [expandedSample, setExpandedSample] = useState(null);
+  const [alleleMatrix, setAlleleMatrix] = useState(null);
   
   // Estados para notificaciones
   const [notification, setNotification] = useState({ show: false, message: '', type: 'info' });
@@ -30,13 +40,16 @@ const Dashboard = () => {
   // Verificar estado del backend al cargar
   useEffect(() => {
     checkBackendStatus();
+    loadProjects();
   }, []);
 
   const checkBackendStatus = async () => {
     try {
       const response = await fetch('http://localhost:8888/api/health');
       if (response.ok) {
+        const data = await response.json();
         setBackendStatus('Connected');
+        console.log('Backend status:', data);
       } else {
         setBackendStatus('Error');
       }
@@ -45,11 +58,36 @@ const Dashboard = () => {
     }
   };
 
+  const loadProjects = async () => {
+    try {
+      const response = await fetch('http://localhost:8888/api/projects');
+      if (response.ok) {
+        const data = await response.json();
+        setProjects(data.projects || []);
+      }
+    } catch (error) {
+      console.error('Error loading projects:', error);
+    }
+  };
+
   const showNotification = (message, type = 'info') => {
-    setNotification({ show: true, message, type });
+    // Manejar diferentes tipos de mensajes de error
+    let displayMessage = message;
+    
+    if (typeof message === 'object') {
+      if (message.detail) {
+        displayMessage = message.detail;
+      } else if (Array.isArray(message)) {
+        displayMessage = message[0]?.msg || 'Error desconocido';
+      } else {
+        displayMessage = 'Error en el servidor';
+      }
+    }
+    
+    setNotification({ show: true, message: displayMessage, type });
     setTimeout(() => {
       setNotification({ show: false, message: '', type: 'info' });
-    }, 4000);
+    }, 5000);
   };
 
   // Funciones para proyectos
@@ -70,36 +108,43 @@ const Dashboard = () => {
       
       if (response.ok) {
         const result = await response.json();
-        const newProject = {
-          id: result.project_id,
-          name: projectName,
-          created: new Date().toLocaleDateString(),
-          samples: 0
-        };
-        setProjects([...projects, newProject]);
         setProjectName('');
         setCreateProjectOpen(false);
-        showNotification('Proyecto creado exitosamente', 'success');
+        loadProjects(); // Recargar lista
+        showNotification(result.message || 'Proyecto creado exitosamente', 'success');
       } else {
-        showNotification('Error al crear el proyecto', 'error');
+        const errorData = await response.json().catch(() => ({ detail: 'Error desconocido' }));
+        console.error('Error response:', errorData);
+        showNotification(errorData, 'error');
       }
     } catch (error) {
       showNotification('Error de conexión con el backend', 'error');
     }
   };
 
-  const selectProject = (project) => {
+  const selectProject = async (project) => {
     setCurrentProject(project);
-    // Aquí cargarías las muestras del proyecto desde el backend
-    loadProjectSamples(project.id);
+    await loadProjectDetails(project.id);
   };
 
-  const loadProjectSamples = async (projectId) => {
-    // Por ahora simulamos datos, después esto vendría del backend
-    setSamples([
-      { id: '1', filename: 'sample001.fsa', status: 'analyzed', alleles: 12 },
-      { id: '2', filename: 'sample002.fsa', status: 'pending', alleles: 0 },
-    ]);
+  const loadProjectDetails = async (projectId) => {
+    try {
+      const response = await fetch(`http://localhost:8888/api/projects/${projectId}`);
+      if (response.ok) {
+        const data = await response.json();
+        setSamples(data.samples_data || []);
+        setProjectStats(data.metadata || {});
+        
+        // Cargar matriz de alelos
+        const matrixResponse = await fetch(`http://localhost:8888/api/projects/${projectId}/allele_matrix`);
+        if (matrixResponse.ok) {
+          const matrixData = await matrixResponse.json();
+          setAlleleMatrix(matrixData);
+        }
+      }
+    } catch (error) {
+      showNotification('Error cargando detalles del proyecto', 'error');
+    }
   };
 
   // Funciones para archivos
@@ -114,6 +159,9 @@ const Dashboard = () => {
       return;
     }
 
+    setUploading(true);
+    setUploadProgress(0);
+
     try {
       const formData = new FormData();
       selectedFiles.forEach(file => {
@@ -127,16 +175,40 @@ const Dashboard = () => {
 
       if (response.ok) {
         const result = await response.json();
-        showNotification(`${result.samples.length} archivos subidos exitosamente`, 'success');
+        showNotification(result.message, 'success');
         setSelectedFiles([]);
         setUploadFilesOpen(false);
-        loadProjectSamples(currentProject.id);
+        await loadProjectDetails(currentProject.id); // Recargar datos del proyecto
       } else {
-        showNotification('Error al subir archivos', 'error');
+        const errorData = await response.json().catch(() => ({ detail: 'Error desconocido' }));
+        console.error('Error uploading files:', errorData);
+        showNotification(errorData, 'error');
       }
     } catch (error) {
       showNotification('Error de conexión con el backend', 'error');
+    } finally {
+      setUploading(false);
+      setUploadProgress(0);
     }
+  };
+
+  const getStatusIcon = (status) => {
+    switch (status) {
+      case 'analyzed':
+        return <CheckCircle color="success" />;
+      case 'error':
+        return <Error color="error" />;
+      case 'manually_reviewed':
+        return <Settings color="primary" />;
+      default:
+        return <Pending color="warning" />;
+    }
+  };
+
+  const getQualityColor = (score) => {
+    if (score >= 0.8) return 'success';
+    if (score >= 0.6) return 'warning';
+    return 'error';
   };
 
   // Vista principal si no hay proyecto seleccionado
@@ -145,13 +217,19 @@ const Dashboard = () => {
       <Box sx={{ p: 3 }}>
         {/* Header con estado del backend */}
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-          <Typography variant="h4" component="h1">
-            GenotypeR 
-          </Typography>
+          <Box>
+            <Typography variant="h3" component="h1" sx={{ fontWeight: 'bold', color: 'primary.main' }}>
+              🧬 GenotypeR
+            </Typography>
+            <Typography variant="h6" color="text.secondary">
+              Software de Análisis Genético Profesional
+            </Typography>
+          </Box>
           <Chip 
             label={`Backend: ${backendStatus}`}
             color={backendStatus === 'Connected' ? 'success' : 'error'}
             variant="outlined"
+            icon={backendStatus === 'Connected' ? <CheckCircle /> : <Error />}
           />
         </Box>
 
@@ -162,16 +240,56 @@ const Dashboard = () => {
           </Alert>
         )}
 
+        {/* Estadísticas globales */}
+        <Grid container spacing={3} sx={{ mb: 4 }}>
+          <Grid item xs={12} sm={4}>
+            <Card>
+              <CardContent sx={{ textAlign: 'center' }}>
+                <Typography variant="h3" color="primary">
+                  {projects.length}
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Proyectos Totales
+                </Typography>
+              </CardContent>
+            </Card>
+          </Grid>
+          <Grid item xs={12} sm={4}>
+            <Card>
+              <CardContent sx={{ textAlign: 'center' }}>
+                <Typography variant="h3" color="success.main">
+                  {projects.reduce((acc, p) => acc + (p.metadata?.total_samples || 0), 0)}
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Muestras Procesadas
+                </Typography>
+              </CardContent>
+            </Card>
+          </Grid>
+          <Grid item xs={12} sm={4}>
+            <Card>
+              <CardContent sx={{ textAlign: 'center' }}>
+                <Typography variant="h3" color="info.main">
+                  {projects.reduce((acc, p) => acc + (p.metadata?.analyzed_samples || 0), 0)}
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Análisis Completados
+                </Typography>
+              </CardContent>
+            </Card>
+          </Grid>
+        </Grid>
+
         {/* Acciones rápidas */}
         <Grid container spacing={3} sx={{ mb: 4 }}>
           <Grid item xs={12} md={6}>
-            <Card sx={{ height: '100%' }}>
+            <Card sx={{ height: '100%', background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)', color: 'white' }}>
               <CardContent>
-                <Science sx={{ fontSize: 40, color: 'primary.main', mb: 2 }} />
+                <Science sx={{ fontSize: 40, mb: 2 }} />
                 <Typography variant="h6" gutterBottom>
                   Nuevo Proyecto
                 </Typography>
-                <Typography variant="body2" color="text.secondary">
+                <Typography variant="body2" sx={{ opacity: 0.9 }}>
                   Crea un nuevo proyecto de análisis genético y comienza a subir tus archivos FSA.
                 </Typography>
               </CardContent>
@@ -180,6 +298,7 @@ const Dashboard = () => {
                   variant="contained" 
                   startIcon={<Add />}
                   onClick={() => setCreateProjectOpen(true)}
+                  sx={{ backgroundColor: 'rgba(255,255,255,0.2)', '&:hover': { backgroundColor: 'rgba(255,255,255,0.3)' } }}
                 >
                   Crear Proyecto
                 </Button>
@@ -188,19 +307,23 @@ const Dashboard = () => {
           </Grid>
           
           <Grid item xs={12} md={6}>
-            <Card sx={{ height: '100%' }}>
+            <Card sx={{ height: '100%', background: 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)', color: 'white' }}>
               <CardContent>
-                <FolderOpen sx={{ fontSize: 40, color: 'primary.main', mb: 2 }} />
+                <Analytics sx={{ fontSize: 40, mb: 2 }} />
                 <Typography variant="h6" gutterBottom>
-                  Abrir Proyecto
+                  Análisis Avanzado
                 </Typography>
-                <Typography variant="body2" color="text.secondary">
-                  Continúa trabajando en un proyecto existente. Analiza muestras y exporta resultados.
+                <Typography variant="body2" sx={{ opacity: 0.9 }}>
+                  Herramientas de análisis genético con detección automática de alelos y control de calidad.
                 </Typography>
               </CardContent>
               <CardActions>
-                <Button variant="outlined" disabled={projects.length === 0}>
-                  Ver Proyectos
+                <Button 
+                  variant="contained" 
+                  disabled={projects.length === 0}
+                  sx={{ backgroundColor: 'rgba(255,255,255,0.2)', '&:hover': { backgroundColor: 'rgba(255,255,255,0.3)' } }}
+                >
+                  Ver Análisis
                 </Button>
               </CardActions>
             </Card>
@@ -208,43 +331,117 @@ const Dashboard = () => {
         </Grid>
 
         {/* Lista de proyectos existentes */}
-        <Typography variant="h5" gutterBottom>
+        <Typography variant="h5" gutterBottom sx={{ display: 'flex', alignItems: 'center' }}>
+          <FolderOpen sx={{ mr: 1 }} />
           Proyectos Recientes
         </Typography>
         
         {projects.length === 0 ? (
           <Card>
-            <CardContent sx={{ textAlign: 'center', py: 4 }}>
-              <FolderOpen sx={{ fontSize: 60, color: 'text.disabled', mb: 2 }} />
-              <Typography variant="h6" color="text.secondary" gutterBottom>
+            <CardContent sx={{ textAlign: 'center', py: 6 }}>
+              <FolderOpen sx={{ fontSize: 80, color: 'text.disabled', mb: 2 }} />
+              <Typography variant="h5" color="text.secondary" gutterBottom>
                 No hay proyectos
               </Typography>
-              <Typography variant="body2" color="text.secondary">
+              <Typography variant="body1" color="text.secondary" sx={{ mb: 3 }}>
                 Crea tu primer proyecto para comenzar con el análisis genético
               </Typography>
+              <Button 
+                variant="contained" 
+                startIcon={<Add />}
+                onClick={() => setCreateProjectOpen(true)}
+                size="large"
+              >
+                Crear Primer Proyecto
+              </Button>
             </CardContent>
           </Card>
         ) : (
-          <Grid container spacing={2}>
+          <Grid container spacing={3}>
             {projects.map((project) => (
               <Grid item xs={12} sm={6} md={4} key={project.id}>
-                <Card sx={{ cursor: 'pointer' }} onClick={() => selectProject(project)}>
+                <Card 
+                  sx={{ 
+                    cursor: 'pointer',
+                    transition: 'transform 0.2s, box-shadow 0.2s',
+                    '&:hover': {
+                      transform: 'translateY(-4px)',
+                      boxShadow: 4
+                    }
+                  }} 
+                  onClick={() => selectProject(project)}
+                >
                   <CardContent>
-                    <Typography variant="h6" gutterBottom noWrap>
-                      {project.name}
-                    </Typography>
-                    <Typography variant="body2" color="text.secondary">
-                      Creado: {project.created}
-                    </Typography>
-                    <Typography variant="body2" color="text.secondary">
-                      Muestras: {project.samples}
-                    </Typography>
+                    <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
+                      <Avatar sx={{ bgcolor: 'primary.main', mr: 2 }}>
+                        <Science />
+                      </Avatar>
+                      <Box>
+                        <Typography variant="h6" noWrap>
+                          {project.name}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          {project.created_at}
+                        </Typography>
+                      </Box>
+                    </Box>
+                    
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1 }}>
+                      <Typography variant="body2" color="text.secondary">
+                        Muestras:
+                      </Typography>
+                      <Chip 
+                        label={project.metadata?.total_samples || 0} 
+                        size="small" 
+                        color="primary"
+                      />
+                    </Box>
+                    
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1 }}>
+                      <Typography variant="body2" color="text.secondary">
+                        Analizadas:
+                      </Typography>
+                      <Chip 
+                        label={project.metadata?.analyzed_samples || 0} 
+                        size="small" 
+                        color="success"
+                      />
+                    </Box>
+                    
+                    {project.metadata?.loci_detected?.length > 0 && (
+                      <Box sx={{ mt: 2 }}>
+                        <Typography variant="caption" color="text.secondary">
+                          Loci detectados:
+                        </Typography>
+                        <Box sx={{ mt: 0.5 }}>
+                          {project.metadata.loci_detected.slice(0, 3).map((locus) => (
+                            <Chip 
+                              key={locus} 
+                              label={locus} 
+                              size="small" 
+                              variant="outlined"
+                              sx={{ mr: 0.5, mb: 0.5 }}
+                            />
+                          ))}
+                          {project.metadata.loci_detected.length > 3 && (
+                            <Chip 
+                              label={`+${project.metadata.loci_detected.length - 3}`} 
+                              size="small" 
+                              variant="outlined"
+                            />
+                          )}
+                        </Box>
+                      </Box>
+                    )}
                   </CardContent>
                   <CardActions>
                     <Button size="small" startIcon={<Visibility />}>
                       Abrir
                     </Button>
-                    <IconButton size="small" color="error">
+                    <IconButton size="small" color="error" onClick={(e) => {
+                      e.stopPropagation();
+                      // TODO: Implementar borrado de proyecto
+                    }}>
                       <Delete />
                     </IconButton>
                   </CardActions>
@@ -256,7 +453,12 @@ const Dashboard = () => {
 
         {/* Modal crear proyecto */}
         <Dialog open={createProjectOpen} onClose={() => setCreateProjectOpen(false)} maxWidth="sm" fullWidth>
-          <DialogTitle>Crear Nuevo Proyecto</DialogTitle>
+          <DialogTitle>
+            <Box sx={{ display: 'flex', alignItems: 'center' }}>
+              <Science sx={{ mr: 1, color: 'primary.main' }} />
+              Crear Nuevo Proyecto
+            </Box>
+          </DialogTitle>
           <DialogContent>
             <TextField
               autoFocus
@@ -269,13 +471,20 @@ const Dashboard = () => {
               placeholder="Ej: Análisis Forense Caso 001"
               sx={{ mt: 2 }}
             />
-            <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
               Este nombre se usará para identificar tu proyecto y generar reportes.
+              Se recomienda usar nombres descriptivos que incluyan fecha o número de caso.
             </Typography>
           </DialogContent>
           <DialogActions>
             <Button onClick={() => setCreateProjectOpen(false)}>Cancelar</Button>
-            <Button variant="contained" onClick={createProject}>Crear</Button>
+            <Button 
+              variant="contained" 
+              onClick={createProject}
+              disabled={!projectName.trim()}
+            >
+              Crear
+            </Button>
           </DialogActions>
         </Dialog>
       </Box>
@@ -288,11 +497,12 @@ const Dashboard = () => {
       {/* Header del proyecto */}
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
         <Box>
-          <Typography variant="h4" component="h1">
+          <Typography variant="h4" component="h1" sx={{ display: 'flex', alignItems: 'center' }}>
+            <Science sx={{ mr: 1, color: 'primary.main' }} />
             {currentProject.name}
           </Typography>
-          <Typography variant="body2" color="text.secondary">
-            {samples.length} muestras • Creado: {currentProject.created}
+          <Typography variant="body1" color="text.secondary">
+            {projectStats.total_samples || 0} muestras • Creado: {currentProject.created_at}
           </Typography>
         </Box>
         <Box>
@@ -301,12 +511,12 @@ const Dashboard = () => {
             sx={{ mr: 1 }}
             onClick={() => setCurrentProject(null)}
           >
-            Volver
+            ← Volver
           </Button>
           <Button 
             variant="contained"
             startIcon={<Download />}
-            disabled={samples.length === 0}
+            disabled={(projectStats.analyzed_samples || 0) === 0}
           >
             Exportar
           </Button>
@@ -320,13 +530,13 @@ const Dashboard = () => {
         </Alert>
       )}
 
-      {/* Estadísticas rápidas */}
+      {/* Estadísticas del proyecto */}
       <Grid container spacing={3} sx={{ mb: 4 }}>
-        <Grid item xs={12} sm={4}>
+        <Grid item xs={12} sm={3}>
           <Card>
             <CardContent sx={{ textAlign: 'center' }}>
               <Typography variant="h3" color="primary">
-                {samples.length}
+                {projectStats.total_samples || 0}
               </Typography>
               <Typography variant="body2" color="text.secondary">
                 Total Muestras
@@ -334,11 +544,11 @@ const Dashboard = () => {
             </CardContent>
           </Card>
         </Grid>
-        <Grid item xs={12} sm={4}>
+        <Grid item xs={12} sm={3}>
           <Card>
             <CardContent sx={{ textAlign: 'center' }}>
               <Typography variant="h3" color="success.main">
-                {samples.filter(s => s.status === 'analyzed').length}
+                {projectStats.analyzed_samples || 0}
               </Typography>
               <Typography variant="body2" color="text.secondary">
                 Analizadas
@@ -346,14 +556,26 @@ const Dashboard = () => {
             </CardContent>
           </Card>
         </Grid>
-        <Grid item xs={12} sm={4}>
+        <Grid item xs={12} sm={3}>
+          <Card>
+            <CardContent sx={{ textAlign: 'center' }}>
+              <Typography variant="h3" color="info.main">
+                {projectStats.loci_detected?.length || 0}
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Loci Detectados
+              </Typography>
+            </CardContent>
+          </Card>
+        </Grid>
+        <Grid item xs={12} sm={3}>
           <Card>
             <CardContent sx={{ textAlign: 'center' }}>
               <Typography variant="h3" color="warning.main">
-                {samples.filter(s => s.status === 'pending').length}
+                {samples.filter(s => s.status === 'error').length}
               </Typography>
               <Typography variant="body2" color="text.secondary">
-                Pendientes
+                Con Errores
               </Typography>
             </CardContent>
           </Card>
@@ -361,10 +583,11 @@ const Dashboard = () => {
       </Grid>
 
       {/* Lista de muestras */}
-      <Card>
+      <Card sx={{ mb: 3 }}>
         <CardContent>
           <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-            <Typography variant="h6">
+            <Typography variant="h6" sx={{ display: 'flex', alignItems: 'center' }}>
+              <Science sx={{ mr: 1 }} />
               Muestras del Proyecto
             </Typography>
             <Button 
@@ -372,7 +595,7 @@ const Dashboard = () => {
               startIcon={<Upload />}
               onClick={() => setUploadFilesOpen(true)}
             >
-              Subir Archivos
+              Subir Archivos FSA
             </Button>
           </Box>
           
@@ -382,49 +605,199 @@ const Dashboard = () => {
               <Typography variant="h6" color="text.secondary" gutterBottom>
                 No hay muestras
               </Typography>
-              <Typography variant="body2" color="text.secondary">
-                Sube archivos FSA para comenzar el análisis
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+                Sube archivos FSA para comenzar el análisis automático
               </Typography>
+              <Button 
+                variant="contained" 
+                startIcon={<Upload />}
+                onClick={() => setUploadFilesOpen(true)}
+              >
+                Subir Primer Archivo
+              </Button>
             </Box>
           ) : (
-            <List>
-              {samples.map((sample) => (
-                <ListItem key={sample.id} divider>
-                  <ListItemText
-                    primary={sample.filename}
-                    secondary={
-                      <Box>
-                        <Chip 
-                          label={sample.status === 'analyzed' ? 'Analizada' : 'Pendiente'}
-                          size="small"
-                          color={sample.status === 'analyzed' ? 'success' : 'warning'}
-                          sx={{ mr: 1 }}
-                        />
-                        {sample.alleles > 0 && (
-                          <Typography component="span" variant="caption">
-                            {sample.alleles} alelos detectados
-                          </Typography>
-                        )}
-                      </Box>
-                    }
-                  />
-                  <ListItemSecondaryAction>
-                    <IconButton edge="end">
-                      <Science />
-                    </IconButton>
-                    <IconButton edge="end">
-                      <Edit />
-                    </IconButton>
-                  </ListItemSecondaryAction>
-                </ListItem>
-              ))}
-            </List>
+            <TableContainer>
+              <Table>
+                <TableHead>
+                  <TableRow>
+                    <TableCell>Archivo</TableCell>
+                    <TableCell>Estado</TableCell>
+                    <TableCell>Canales</TableCell>
+                    <TableCell>Calidad</TableCell>
+                    <TableCell>Alelos</TableCell>
+                    <TableCell>Acciones</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {samples.map((sample) => (
+                    <React.Fragment key={sample.id}>
+                      <TableRow>
+                        <TableCell>
+                          <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                            {getStatusIcon(sample.status)}
+                            <Box sx={{ ml: 1 }}>
+                              <Typography variant="body2" fontWeight="medium">
+                                {sample.filename}
+                              </Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                {sample.metadata?.sample_name || 'Unknown'}
+                              </Typography>
+                            </Box>
+                          </Box>
+                        </TableCell>
+                        <TableCell>
+                          <Chip 
+                            label={sample.status === 'analyzed' ? 'Analizada' : 
+                                  sample.status === 'error' ? 'Error' : 
+                                  sample.status === 'manually_reviewed' ? 'Revisada' : 'Pendiente'}
+                            size="small"
+                            color={sample.status === 'analyzed' ? 'success' : 
+                                  sample.status === 'error' ? 'error' : 
+                                  sample.status === 'manually_reviewed' ? 'primary' : 'warning'}
+                          />
+                        </TableCell>
+                        <TableCell>{sample.metadata?.channels || 0}</TableCell>
+                        <TableCell>
+                          <Chip 
+                            label={`${Math.round((sample.metadata?.quality_score || 0) * 100)}%`}
+                            size="small"
+                            color={getQualityColor(sample.metadata?.quality_score || 0)}
+                          />
+                        </TableCell>
+                        <TableCell>
+                          {Object.values(sample.fsa_data?.alleles || {}).reduce((acc, channelAlleles) => 
+                            acc + Object.keys(channelAlleles).length, 0
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <IconButton 
+                            size="small"
+                            onClick={() => setExpandedSample(expandedSample === sample.id ? null : sample.id)}
+                          >
+                            {expandedSample === sample.id ? <ExpandLess /> : <ExpandMore />}
+                          </IconButton>
+                          <IconButton size="small">
+                            <Edit />
+                          </IconButton>
+                        </TableCell>
+                      </TableRow>
+                      
+                      {/* Detalles expandidos */}
+                      <TableRow>
+                        <TableCell colSpan={6} sx={{ p: 0 }}>
+                          <Collapse in={expandedSample === sample.id}>
+                            <Box sx={{ p: 3, bgcolor: 'grey.50' }}>
+                              <Typography variant="h6" gutterBottom>
+                                Detalles de la Muestra
+                              </Typography>
+                              
+                              <Grid container spacing={3}>
+                                <Grid item xs={12} md={6}>
+                                  <Typography variant="subtitle2" gutterBottom>
+                                    Información General
+                                  </Typography>
+                                  <Typography variant="body2">
+                                    <strong>Instrumento:</strong> {sample.metadata?.instrument || 'N/A'}
+                                  </Typography>
+                                  <Typography variant="body2">
+                                    <strong>Fecha de corrida:</strong> {sample.metadata?.run_date || 'N/A'}
+                                  </Typography>
+                                  <Typography variant="body2">
+                                    <strong>Puntos de datos:</strong> {sample.metadata?.data_points || 0}
+                                  </Typography>
+                                </Grid>
+                                
+                                <Grid item xs={12} md={6}>
+                                  <Typography variant="subtitle2" gutterBottom>
+                                    Alelos Detectados
+                                  </Typography>
+                                  {Object.entries(sample.fsa_data?.alleles || {}).map(([channel, channelAlleles]) => (
+                                    <Box key={channel} sx={{ mb: 1 }}>
+                                      <Typography variant="caption" color="text.secondary">
+                                        {channel}:
+                                      </Typography>
+                                      {Object.entries(channelAlleles).map(([locus, alleles]) => (
+                                        <Box key={locus} sx={{ ml: 1 }}>
+                                          <Chip 
+                                            label={`${locus}: ${alleles.join('/')}`}
+                                            size="small"
+                                            variant="outlined"
+                                            sx={{ mr: 0.5, mb: 0.5 }}
+                                          />
+                                        </Box>
+                                      ))}
+                                    </Box>
+                                  ))}
+                                </Grid>
+                              </Grid>
+                            </Box>
+                          </Collapse>
+                        </TableCell>
+                      </TableRow>
+                    </React.Fragment>
+                  ))}
+                </TableBody>
+              </Table>
+            </TableContainer>
           )}
         </CardContent>
       </Card>
 
+      {/* Matriz de alelos */}
+      {alleleMatrix && alleleMatrix.loci.length > 0 && (
+        <Card>
+          <CardContent>
+            <Typography variant="h6" gutterBottom sx={{ display: 'flex', alignItems: 'center' }}>
+              <TableChart sx={{ mr: 1 }} />
+              Matriz de Genotipos
+            </Typography>
+            
+            <TableContainer component={Paper} variant="outlined">
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    <TableCell>Muestra</TableCell>
+                    {alleleMatrix.loci.map((locus) => (
+                      <TableCell key={locus} align="center">{locus}</TableCell>
+                    ))}
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {alleleMatrix.samples.map((sample) => (
+                    <TableRow key={sample.sample_id}>
+                      <TableCell>
+                        <Typography variant="body2" fontWeight="medium">
+                          {sample.filename}
+                        </Typography>
+                      </TableCell>
+                      {alleleMatrix.loci.map((locus) => (
+                        <TableCell key={locus} align="center">
+                          {sample[locus] ? (
+                            <Chip 
+                              label={sample[locus]} 
+                              size="small" 
+                              color="primary"
+                              variant="outlined"
+                            />
+                          ) : (
+                            <Typography variant="caption" color="text.disabled">
+                              -
+                            </Typography>
+                          )}
+                        </TableCell>
+                      ))}
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          </CardContent>
+        </Card>
+      )}
+
       {/* FAB para acciones rápidas */}
-      <Tooltip title="Subir archivos">
+      <Tooltip title="Subir archivos FSA">
         <Fab 
           color="primary" 
           sx={{ position: 'fixed', bottom: 24, right: 24 }}
@@ -435,36 +808,104 @@ const Dashboard = () => {
       </Tooltip>
 
       {/* Modal subir archivos */}
-      <Dialog open={uploadFilesOpen} onClose={() => setUploadFilesOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>Subir Archivos FSA</DialogTitle>
+      <Dialog open={uploadFilesOpen} onClose={() => setUploadFilesOpen(false)} maxWidth="md" fullWidth>
+        <DialogTitle>
+          <Box sx={{ display: 'flex', alignItems: 'center' }}>
+            <Upload sx={{ mr: 1, color: 'primary.main' }} />
+            Subir Archivos FSA
+          </Box>
+        </DialogTitle>
         <DialogContent>
+          <Box sx={{ mb: 3 }}>
+            <Typography variant="body2" color="text.secondary" gutterBottom>
+              Selecciona archivos FSA (.fsa) o AB1 (.ab1) para análisis automático.
+              El sistema detectará automáticamente picos y llamará alelos.
+            </Typography>
+          </Box>
+          
           <input
             type="file"
             multiple
-            accept=".fsa,.ab1,.txt"
+            accept=".fsa,.ab1"
             onChange={(e) => setSelectedFiles(Array.from(e.target.files))}
-            style={{ width: '100%', padding: '20px', border: '2px dashed #ccc', borderRadius: '8px', textAlign: 'center', marginTop: '16px' }}
+            style={{ 
+              width: '100%', 
+              padding: '40px', 
+              border: '2px dashed #ccc', 
+              borderRadius: '12px', 
+              textAlign: 'center', 
+              marginTop: '16px',
+              backgroundColor: '#fafafa',
+              cursor: 'pointer'
+            }}
           />
+          
           {selectedFiles.length > 0 && (
+            <Box sx={{ mt: 3 }}>
+              <Typography variant="subtitle2" gutterBottom>
+                Archivos seleccionados ({selectedFiles.length}):
+              </Typography>
+              <Box sx={{ maxHeight: 200, overflow: 'auto' }}>
+                {selectedFiles.map((file, index) => (
+                  <Box key={index} sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', p: 1 }}>
+                    <Box>
+                      <Typography variant="body2" fontWeight="medium">
+                        {file.name}
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        {(file.size / 1024 / 1024).toFixed(2)} MB
+                      </Typography>
+                    </Box>
+                    <Chip 
+                      label={file.name.split('.').pop().toUpperCase()} 
+                      size="small" 
+                      color="primary"
+                      variant="outlined"
+                    />
+                  </Box>
+                ))}
+              </Box>
+              
+              <Box sx={{ mt: 2, p: 2, bgcolor: 'primary.50', borderRadius: 1 }}>
+                <Typography variant="body2" color="primary.main">
+                  <strong>Análisis automático incluye:</strong>
+                </Typography>
+                <Typography variant="caption" display="block">
+                  • Detección automática de picos
+                </Typography>
+                <Typography variant="caption" display="block">
+                  • Llamado de alelos por locus
+                </Typography>
+                <Typography variant="caption" display="block">
+                  • Control de calidad de señales
+                </Typography>
+                <Typography variant="caption" display="block">
+                  • Calibración de tamaños automática
+                </Typography>
+              </Box>
+            </Box>
+          )}
+          
+          {uploading && (
             <Box sx={{ mt: 2 }}>
               <Typography variant="body2" gutterBottom>
-                Archivos seleccionados:
+                Procesando archivos...
               </Typography>
-              {selectedFiles.map((file, index) => (
-                <Chip 
-                  key={index} 
-                  label={file.name} 
-                  size="small" 
-                  sx={{ mr: 1, mb: 1 }}
-                />
-              ))}
+              <LinearProgress variant="indeterminate" />
             </Box>
           )}
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setUploadFilesOpen(false)}>Cancelar</Button>
-          <Button variant="contained" onClick={handleFileUpload}>
-            Subir {selectedFiles.length} archivo(s)
+          <Button onClick={() => setUploadFilesOpen(false)} disabled={uploading}>
+            Cancelar
+          </Button>
+          <Button 
+            variant="contained" 
+            onClick={handleFileUpload}
+            disabled={selectedFiles.length === 0 || uploading}
+            startIcon={uploading ? <Science /> : <Upload />}
+          >
+            {uploading ? 'Analizando...' : `Subir y Analizar ${selectedFiles.length} archivo(s)`}
           </Button>
         </DialogActions>
       </Dialog>
