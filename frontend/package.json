@@ -22,7 +22,8 @@
   },
   "eslintConfig": {
     "extends": [
-      "react-app"
+      "react-app",
+      "react-app/jest"
     ]
   },
   "browserslist": {
@@ -37,4 +38,4 @@
       "last 1 safari version"
     ]
   }
-}  
+}
