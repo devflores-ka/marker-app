@@ -5,7 +5,7 @@
   "main": "electron/main.js",
   "scripts": {
     "dev": "concurrently \"npm run dev:react\" \"npm run dev:python\" \"wait-on http://localhost:3000 && npm run dev:electron\"",
-    "dev:react": "cd frontend && react-scripts start",
+    "dev:react": "cd frontend && cross-env BROWSER=none npm start",
     "dev:python": "cd backend && python app.py",
     "dev:electron": "electron .",
     "build": "npm run build:react && npm run build:python",
@@ -19,7 +19,7 @@
   },
   "build": {
     "appId": "com.marker.app",
-    "productName": "Marker App",
+    "productName": "GeneMarker Pro",
     "copyright": "Copyright © 2025 Luciano Flores Rojas",
     "directories": {
       "output": "dist",
@@ -34,7 +34,9 @@
       {
         "from": "backend/dist",
         "to": "backend",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "win": {
@@ -44,10 +46,10 @@
   },
   "devDependencies": {
     "concurrently": "^8.2.2",
+    "cross-env": "^7.0.3",
     "electron": "^28.1.0",
     "electron-builder": "^24.9.1",
-    "wait-on": "^7.2.0",
-    "react-scripts": "5.0.1"
+    "wait-on": "^7.2.0"
   },
   "dependencies": {
     "electron-is-dev": "^2.0.0",
