@@ -132,18 +132,28 @@ async def get_project(project_id: str):
     # Agregar información de muestras
     project_samples = [s for s in samples.values() if s.get("project_id") == project_id]
     
+    # Calcular estadísticas
+    loci_detected = set()
+    for sample in project_samples:
+        if sample["id"] in analysis_cache:
+            alleles = analysis_cache[sample["id"]].get("alleles", {})
+            loci_detected.update(alleles.keys())
+    
     return {
         "success": True,
-        "project": {
-            **project,
-            "samples": project_samples,
-            "sample_count": len(project_samples)
+        "project": project,
+        "samples_data": project_samples,
+        "metadata": {
+            "total_samples": len(project_samples),
+            "analyzed_samples": len([s for s in project_samples if s["status"] == "analyzed"]),
+            "loci_detected": list(loci_detected),
+            "last_updated": project.get("updated_at", project["created_at"])
         }
     }
 
-@app.post("/api/samples/upload")
+@app.post("/api/projects/{project_id}/samples/upload")
 async def upload_samples(
-    project_id: str = Form(...),
+    project_id: str,
     files: List[UploadFile] = File(...)
 ):
     """Subir y analizar archivos FSA/AB1"""
@@ -667,3 +677,4 @@ if __name__ == "__main__":
     print("Ready for genetic analysis!")
     print("="*60)
     uvicorn.run(app, host="127.0.0.1", port=8888)
+    
