@@ -11,6 +11,8 @@ import json
 import traceback
 import asyncio
 from datetime import datetime
+import numpy as np
+from decimal import Decimal
 import io
 
 # Importar el parser mejorado
@@ -53,6 +55,39 @@ app.add_middleware(
 projects: Dict[str, Dict] = {}
 samples: Dict[str, Dict] = {}
 analysis_cache: Dict[str, Dict] = {}
+
+# Función auxiliar para manejar serialización
+def safe_json_serialize(obj):
+    """
+    Convierte objetos Python a tipos serializables por JSON
+    Maneja arrays numpy, decimales, objetos personalizados, etc.
+    """
+    if obj is None:
+        return None
+    elif isinstance(obj, (str, int, float, bool)):
+        return obj
+    elif isinstance(obj, dict):
+        return {str(k): safe_json_serialize(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [safe_json_serialize(item) for item in obj]
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, (np.integer, np.floating)):
+        return float(obj)
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    elif isinstance(obj, Decimal):
+        return float(obj)
+    elif hasattr(obj, 'isoformat'):  # datetime objects
+        return obj.isoformat()
+    elif hasattr(obj, '__dict__'):
+        return safe_json_serialize(obj.__dict__)
+    else:
+        # Fallback: convertir a string
+        try:
+            return str(obj)
+        except:
+            return "No serializable"
 
 @app.get("/")
 async def root():
@@ -298,10 +333,33 @@ async def get_sample_details(sample_id: str):
     sample = samples[sample_id]
     analysis = analysis_cache.get(sample_id, {})
     
+    # Función helper para limpiar datos no serializables
+    def make_serializable(obj):
+        """Convierte objetos no serializables a tipos básicos de Python"""
+        if obj is None:
+            return None
+        elif isinstance(obj, (str, int, float, bool)):
+            return obj
+        elif isinstance(obj, dict):
+            return {k: make_serializable(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [make_serializable(item) for item in obj]
+        elif hasattr(obj, 'tolist'):  # Arrays numpy
+            return obj.tolist()
+        elif hasattr(obj, '__dict__'):  # Objetos con atributos
+            return make_serializable(obj.__dict__)
+        else:
+            # Para otros tipos, convertir a string como fallback
+            return str(obj)
+    
+    # Limpiar los datos antes de enviarlos
+    clean_analysis = make_serializable(analysis)
+    clean_sample = make_serializable(sample)
+    
     return {
         "success": True,
-        "sample": sample,
-        "analysis": analysis
+        "sample": clean_sample,
+        "analysis": clean_analysis
     }
 
 @app.put("/api/samples/{sample_id}/alleles")
@@ -677,4 +735,3 @@ if __name__ == "__main__":
     print("Ready for genetic analysis!")
     print("="*60)
     uvicorn.run(app, host="127.0.0.1", port=8888)
-    

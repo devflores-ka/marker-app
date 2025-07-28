@@ -8,11 +8,15 @@ import {
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
   Paper, Collapse, Avatar
 } from '@mui/material';
+// Agregar Close a los imports de @mui/icons-material
 import {
   Add, FolderOpen, Upload, Science, TableChart,
   Delete, Edit, Visibility, Download, ExpandMore, ExpandLess,
-  CheckCircle, Error, Pending, Analytics, Settings
+  CheckCircle, Error, Pending, Analytics, Settings, Close  // <- Agregar Close aquí
 } from '@mui/icons-material';
+
+// Agregar este import DESPUÉS de todos los imports de MUI
+import ComprehensiveElectropherogramViewer from '../components/EnhancedElectropherogramViewer';
 
 const Dashboard = () => {
   // Estados principales
@@ -33,6 +37,10 @@ const Dashboard = () => {
   // Estados para detalles
   const [expandedSample, setExpandedSample] = useState(null);
   const [alleleMatrix, setAlleleMatrix] = useState(null);
+
+  // Estados para el visualizador de electroferogramas
+  const [selectedSampleId, setSelectedSampleId] = useState(null);
+  const [viewerOpen, setViewerOpen] = useState(false);
   
   // Estados para notificaciones
   const [notification, setNotification] = useState({ show: false, message: '', type: 'info' });
@@ -209,6 +217,17 @@ const Dashboard = () => {
     if (score >= 0.8) return 'success';
     if (score >= 0.6) return 'warning';
     return 'error';
+  };
+
+  // Funciones para el visualizador
+  const handleOpenViewer = (sampleId) => {
+    setSelectedSampleId(sampleId);
+    setViewerOpen(true);
+  };
+
+  const handleCloseViewer = () => {
+    setViewerOpen(false);
+    setSelectedSampleId(null);
   };
 
   // Vista principal si no hay proyecto seleccionado
@@ -671,15 +690,53 @@ const Dashboard = () => {
                           )}
                         </TableCell>
                         <TableCell>
-                          <IconButton 
-                            size="small"
-                            onClick={() => setExpandedSample(expandedSample === sample.id ? null : sample.id)}
-                          >
-                            {expandedSample === sample.id ? <ExpandLess /> : <ExpandMore />}
-                          </IconButton>
-                          <IconButton size="small">
-                            <Edit />
-                          </IconButton>
+                          <Box sx={{ display: 'flex', gap: 1 }}>
+                            {/* Botón para expandir/contraer detalles básicos */}
+                            <Tooltip title={expandedSample === sample.id ? "Ocultar detalles" : "Ver detalles"}>
+                              <IconButton 
+                                size="small"
+                                onClick={() => setExpandedSample(expandedSample === sample.id ? null : sample.id)}
+                              >
+                                {expandedSample === sample.id ? <ExpandLess /> : <ExpandMore />}
+                              </IconButton>
+                            </Tooltip>
+                            
+                            {/* Botón para abrir el visualizador completo */}
+                            <Tooltip title="Ver electroferograma">
+                              <IconButton 
+                                size="small"
+                                color="primary"
+                                onClick={() => handleOpenViewer(sample.id)}
+                                disabled={sample.status !== 'analyzed'}
+                              >
+                                <Visibility />
+                              </IconButton>
+                            </Tooltip>
+                            
+                            {/* Botón para editar */}
+                            <Tooltip title="Editar muestra">
+                              <IconButton 
+                                size="small"
+                                onClick={() => handleOpenViewer(sample.id)}
+                                disabled={sample.status !== 'analyzed'}
+                              >
+                                <Edit />
+                              </IconButton>
+                            </Tooltip>
+                            
+                            {/* Botón para descargar datos */}
+                            <Tooltip title="Descargar datos">
+                              <IconButton 
+                                size="small"
+                                onClick={() => {
+                                  window.open(`http://localhost:8888/api/samples/${sample.id}/download`, '_blank');
+                                }}
+                                disabled={sample.status !== 'analyzed'}
+                              >
+                                <Download />
+                              </IconButton>
+                            </Tooltip>
+                          </Box>
                         </TableCell>
                       </TableRow>
                       
@@ -908,6 +965,51 @@ const Dashboard = () => {
             {uploading ? 'Analizando...' : `Subir y Analizar ${selectedFiles.length} archivo(s)`}
           </Button>
         </DialogActions>
+      </Dialog>
+      {/* Dialog para el visualizador de electroferogramas */}
+      <Dialog 
+        open={viewerOpen} 
+        onClose={handleCloseViewer}
+        maxWidth="xl"
+        fullWidth
+        PaperProps={{
+          sx: {
+            height: '90vh',
+            maxHeight: '90vh'
+          }
+        }}
+      >
+        <DialogTitle sx={{ 
+          display: 'flex', 
+          justifyContent: 'space-between', 
+          alignItems: 'center',
+          borderBottom: 1,
+          borderColor: 'divider'
+        }}>
+          <Typography variant="h5" sx={{ display: 'flex', alignItems: 'center' }}>
+            <Science sx={{ mr: 1 }} />
+            Análisis de Electroferograma
+            {selectedSampleId && samples.find(s => s.id === selectedSampleId) && (
+              <Typography variant="subtitle1" sx={{ ml: 2, color: 'text.secondary' }}>
+                - {samples.find(s => s.id === selectedSampleId).filename}
+              </Typography>
+            )}
+          </Typography>
+          <IconButton onClick={handleCloseViewer}>
+            <Close />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent sx={{ p: 0, overflow: 'hidden' }}>
+          {selectedSampleId && (
+            <ComprehensiveElectropherogramViewer 
+              sampleId={selectedSampleId}
+              onUpdate={() => {
+                // Recargar los datos del proyecto si es necesario
+                loadProjectDetails(currentProject.id);
+              }}
+            />
+          )}
+        </DialogContent>
       </Dialog>
     </Box>
   );
