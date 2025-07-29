@@ -685,9 +685,7 @@ const Dashboard = () => {
                           />
                         </TableCell>
                         <TableCell>
-                          {Object.values(sample.fsa_data?.alleles || {}).reduce((acc, channelAlleles) => 
-                            acc + Object.keys(channelAlleles).length, 0
-                          )}
+                          {Object.keys(sample.fsa_data?.alleles || {}).length}
                         </TableCell>
                         <TableCell>
                           <Box sx={{ display: 'flex', gap: 1 }}>
@@ -754,6 +752,7 @@ const Dashboard = () => {
                                   <Typography variant="subtitle2" gutterBottom>
                                     Información General
                                   </Typography>
+
                                   <Typography variant="body2">
                                     <strong>Instrumento:</strong> {sample.metadata?.instrument || 'N/A'}
                                   </Typography>
@@ -765,27 +764,33 @@ const Dashboard = () => {
                                   </Typography>
                                 </Grid>
                                 
+                                {/* Alelos Detectados */}
                                 <Grid item xs={12} md={6}>
                                   <Typography variant="subtitle2" gutterBottom>
                                     Alelos Detectados
                                   </Typography>
-                                  {Object.entries(sample.fsa_data?.alleles || {}).map(([channel, channelAlleles]) => (
-                                    <Box key={channel} sx={{ mb: 1 }}>
-                                      <Typography variant="caption" color="text.secondary">
-                                        {channel}:
-                                      </Typography>
-                                      {Object.entries(channelAlleles).map(([locus, alleles]) => (
-                                        <Box key={locus} sx={{ ml: 1 }}>
-                                          <Chip 
-                                            label={`${locus}: ${alleles.join('/')}`}
-                                            size="small"
-                                            variant="outlined"
-                                            sx={{ mr: 0.5, mb: 0.5 }}
-                                          />
-                                        </Box>
-                                      ))}
-                                    </Box>
-                                  ))}
+                                  {sample.fsa_data?.alleles ? (
+                                    Object.entries(sample.fsa_data.alleles).map(([locus, alleleData]) => (
+                                      <Box key={locus} sx={{ mb: 1 }}>
+                                        <Chip 
+                                          label={`${locus}: ${alleleData.allele1}/${alleleData.allele2}`}
+                                          size="small"
+                                          variant="outlined"
+                                          sx={{ mr: 0.5, mb: 0.5 }}
+                                          color={alleleData.allele1 === alleleData.allele2 ? "default" : "primary"}
+                                        />
+                                        {alleleData.heterozygous !== undefined && (
+                                          <Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>
+                                            {alleleData.heterozygous ? "(Het)" : "(Hom)"}
+                                          </Typography>
+                                        )}
+                                      </Box>
+                                    ))
+                                  ) : (
+                                    <Typography variant="body2" color="text.secondary">
+                                      No se detectaron alelos
+                                    </Typography>
+                                  )}
                                 </Grid>
                               </Grid>
                             </Box>

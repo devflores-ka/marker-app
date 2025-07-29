@@ -4,9 +4,10 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional, Any
 from datetime import datetime
 import io
-from scipy.signal import savgol_filter, find_peaks
-from scipy.ndimage import gaussian_filter1d
 import logging
+
+# Importar el PeakDetector
+from .peak_detector import PeakDetector
 
 # Intentar importar BioPython para soporte completo
 try:
@@ -46,6 +47,15 @@ class EnhancedFSAParser:
         'GTyp1': 'General type',
         'PSZE1': 'Peak size 1',
         'PSZE2': 'Peak size 2'
+    }
+    
+    # Información de canales y colores
+    CHANNEL_INFO = {
+        'channel_1': {'dye': 'FAM', 'color': 'blue', 'wavelength': '520nm'},
+        'channel_2': {'dye': 'VIC', 'color': 'green', 'wavelength': '548nm'},
+        'channel_3': {'dye': 'NED', 'color': 'yellow', 'wavelength': '575nm'},
+        'channel_4': {'dye': 'PET', 'color': 'red', 'wavelength': '595nm'},
+        'channel_5': {'dye': 'LIZ', 'color': 'orange', 'wavelength': '655nm', 'purpose': 'Size Standard'}
     }
     
     # Marcadores STR estándar para análisis forense
@@ -101,18 +111,35 @@ class EnhancedFSAParser:
                 'instrument': raw_data.get('MODL1', 'Unknown'),
                 'dye_set': raw_data.get('DySN1', 'Unknown'),
                 'lane': raw_data.get('LANE1', 1),
-                'file_type': 'FSA' if is_fsa else 'AB1'
+                'file_type': 'FSA' if is_fsa else 'AB1',
+                'data_points': 0
             }
             
-            # Extraer datos de canales
+            # Extraer datos de canales con información adicional
             channels = {}
+            max_data_points = 0
+            
             for i in range(1, 6):  # Hasta 5 canales posibles
-                data_key = f'DATA{i}'
+                data_key = f'DATA{i}' if i < 5 else 'DATA105'  # Canal 5 es DATA105
                 if data_key in raw_data:
-                    channels[f'channel_{i}'] = {
-                        'raw_data': np.array(raw_data[data_key]),
-                        'color': cls._get_channel_color(i)
+                    channel_data = np.array(raw_data[data_key])
+                    channel_key = f'channel_{i}'
+                    
+                    channels[channel_key] = {
+                        'raw_data': channel_data,
+                        'color': cls.CHANNEL_INFO.get(channel_key, {}).get('color', 'unknown'),
+                        'dye_name': cls.CHANNEL_INFO.get(channel_key, {}).get('dye', 'unknown'),
+                        'wavelength': cls.CHANNEL_INFO.get(channel_key, {}).get('wavelength', 'unknown'),
+                        'data_points': len(channel_data)
                     }
+                    
+                    # Agregar propósito especial si es el canal LIZ
+                    if i == 5:
+                        channels[channel_key]['purpose'] = 'Size Standard'
+                    
+                    max_data_points = max(max_data_points, len(channel_data))
+            
+            metadata['data_points'] = max_data_points
             
             # Extraer datos analizados si existen
             for i in range(9, 13):  # DATA9-DATA12
@@ -122,71 +149,122 @@ class EnhancedFSAParser:
                     if f'channel_{channel_num}' in channels:
                         channels[f'channel_{channel_num}']['analyzed_data'] = np.array(raw_data[data_key])
             
+            # Usar PeakDetector para procesar picos
+            peak_detector = PeakDetector()
+            
             # Procesar canal de escalera de tamaños (LIZ)
-            size_standard = cls._process_size_standard(raw_data)
+            size_standard = {}
+            if 'channel_5' in channels and 'raw_data' in channels['channel_5']:
+                size_standard = peak_detector.process_size_standard(channels['channel_5']['raw_data'])
             
-            # Detectar picos y llamar alelos
-            peaks_data = cls._detect_peaks_all_channels(channels)
-            alleles = cls._call_alleles(peaks_data, size_standard)
+            # Detectar picos en todos los canales
+            peaks_data = peak_detector.detect_peaks_all_channels(channels)
             
-            # Métricas de calidad
-            quality_metrics = cls._calculate_quality_metrics(channels, peaks_data)
+            # Llamar alelos
+            size_calibration = size_standard.get('calibration') if size_standard.get('status') == 'calibrated' else None
+            alleles = peak_detector.call_alleles(peaks_data, size_calibration, cls.STR_MARKERS)
             
+            # Calcular métricas de calidad
+            quality_metrics = cls._calculate_quality_metrics(channels, peaks_data, size_standard)
+            
+            # Construir respuesta completa
             return {
                 'success': True,
                 'filename': filename,
                 'metadata': metadata,
-                'channels': channels,
-                'size_standard': size_standard,
+                'channels': cls._format_channels_for_response(channels),
                 'peaks': peaks_data,
                 'alleles': alleles,
+                'size_standard': size_standard,
                 'quality_metrics': quality_metrics,
-                'raw_abif_data': raw_data  # Para análisis avanzado
+                'str_markers': cls.STR_MARKERS  # Incluir información de marcadores
             }
             
         except Exception as e:
-            logging.error(f"Error procesando {filename} con BioPython: {str(e)}")
+            logging.error(f"Error procesando con BioPython: {str(e)}")
             return cls._create_error_response(filename, str(e))
     
     @classmethod
     def _process_with_internal_parser(cls, content: bytes, filename: str) -> Dict[str, Any]:
         """
-        Parser interno cuando BioPython no está disponible
+        Procesa usando parser interno cuando BioPython no está disponible
         """
         try:
-            stream = io.BytesIO(content)
-            
-            # Verificar signature ABIF
-            signature = stream.read(4)
-            if signature != cls.ABIF_SIGNATURE:
-                raise ValueError("No es un archivo ABIF válido")
+            # Verificar signatura ABIF
+            if len(content) < 128 or content[:4] != cls.ABIF_SIGNATURE:
+                return cls._create_error_response(filename, "No es un archivo ABIF válido")
             
             # Leer header
-            stream.seek(0)
+            stream = io.BytesIO(content)
             header = cls._read_abif_header(stream)
             
-            # Leer directorio de datos
-            directories = cls._read_directory_entries(stream, header)
+            # Leer directorio de tags
+            raw_data = cls._read_abif_directory(stream, header)
             
-            # Extraer datos esenciales
-            metadata = cls._extract_metadata(stream, directories)
-            channels = cls._extract_channel_data(stream, directories)
+            # El resto del procesamiento es similar al de BioPython
+            # Extraer metadatos
+            metadata = {
+                'sample_name': cls._decode_pascal_string(raw_data.get('SMPL1', b'')) or filename,
+                'run_date': cls._parse_date_internal(raw_data.get('RUND1', None)),
+                'instrument': cls._decode_pascal_string(raw_data.get('MODL1', b'')) or 'Unknown',
+                'dye_set': cls._decode_pascal_string(raw_data.get('DySN1', b'')) or 'Unknown',
+                'file_type': 'FSA',
+                'data_points': 0
+            }
             
-            # Procesar datos
-            size_standard = cls._process_size_standard_internal(channels)
-            peaks_data = cls._detect_peaks_all_channels(channels)
-            alleles = cls._call_alleles(peaks_data, size_standard)
-            quality_metrics = cls._calculate_quality_metrics(channels, peaks_data)
+            # Extraer canales
+            channels = {}
+            max_data_points = 0
+            
+            for i in range(1, 6):
+                data_key = f'DATA{i}' if i < 5 else 'DATA105'
+                if data_key in raw_data:
+                    channel_data = cls._parse_data_array(raw_data[data_key])
+                    channel_key = f'channel_{i}'
+                    
+                    channels[channel_key] = {
+                        'raw_data': channel_data,
+                        'color': cls.CHANNEL_INFO.get(channel_key, {}).get('color', 'unknown'),
+                        'dye_name': cls.CHANNEL_INFO.get(channel_key, {}).get('dye', 'unknown'),
+                        'wavelength': cls.CHANNEL_INFO.get(channel_key, {}).get('wavelength', 'unknown'),
+                        'data_points': len(channel_data)
+                    }
+                    
+                    if i == 5:
+                        channels[channel_key]['purpose'] = 'Size Standard'
+                    
+                    max_data_points = max(max_data_points, len(channel_data))
+            
+            metadata['data_points'] = max_data_points
+            
+            # Usar PeakDetector
+            peak_detector = PeakDetector()
+            
+            # Procesar estándar de tamaños
+            size_standard = {}
+            if 'channel_5' in channels and 'raw_data' in channels['channel_5']:
+                size_standard = peak_detector.process_size_standard(channels['channel_5']['raw_data'])
+            
+            # Detectar picos
+            peaks_data = peak_detector.detect_peaks_all_channels(channels)
+            
+            # Llamar alelos
+            size_calibration = size_standard.get('calibration') if size_standard.get('status') == 'calibrated' else None
+            alleles = peak_detector.call_alleles(peaks_data, size_calibration, cls.STR_MARKERS)
+            
+            # Calcular métricas de calidad
+            quality_metrics = cls._calculate_quality_metrics(channels, peaks_data, size_standard)
             
             return {
                 'success': True,
                 'filename': filename,
                 'metadata': metadata,
-                'channels': channels,
-                'size_standard': size_standard,
+                'channels': cls._format_channels_for_response(channels),
                 'peaks': peaks_data,
                 'alleles': alleles,
-                'quality_metrics': quality_metrics
+                'size_standard': size_standard,
+                'quality_metrics': quality_metrics,
+                'str_markers': cls.STR_MARKERS
             }
             
         except Exception as e:
@@ -194,242 +272,92 @@ class EnhancedFSAParser:
             return cls._create_error_response(filename, str(e))
     
     @classmethod
-    def _detect_peaks_all_channels(cls, channels: Dict) -> Dict[str, List[Dict]]:
+    def _format_channels_for_response(cls, channels: Dict) -> Dict:
         """
-        Detecta picos en todos los canales usando algoritmos avanzados
+        Formatea los canales para la respuesta, incluyendo solo información relevante
         """
-        peaks_data = {}
+        formatted_channels = {}
         
-        for channel_name, channel_data in channels.items():
-            if 'raw_data' not in channel_data:
-                continue
-                
-            # Usar datos analizados si están disponibles, sino usar raw
-            data = channel_data.get('analyzed_data', channel_data['raw_data'])
-            
-            # Detección de picos con múltiples métodos
-            peaks = cls._advanced_peak_detection(data)
-            
-            # Filtrar picos por calidad
-            filtered_peaks = cls._filter_peaks_by_quality(data, peaks)
-            
-            peaks_data[channel_name] = filtered_peaks
-            
-        return peaks_data
-    
-    @classmethod
-    def _advanced_peak_detection(cls, signal_data: np.ndarray, 
-                               min_height_ratio: float = 0.05) -> List[Dict]:
-        """
-        Detección avanzada de picos usando métodos derivativos
-        """
-        # Pre-procesamiento: suavizado y corrección de línea base
-        smoothed = savgol_filter(signal_data, window_length=5, polyorder=2)
-        baseline = gaussian_filter1d(smoothed, sigma=50)
-        corrected = smoothed - baseline
-        
-        # Normalizar
-        if np.max(corrected) > 0:
-            normalized = corrected / np.max(corrected)
-        else:
-            return []
-        
-        # Detectar picos con scipy
-        min_height = min_height_ratio * np.max(normalized)
-        peaks, properties = find_peaks(
-            normalized,
-            height=min_height,
-            distance=10,  # Mínima distancia entre picos
-            prominence=min_height/2
-        )
-        
-        # Construir lista de picos con propiedades
-        peak_list = []
-        for i, peak_idx in enumerate(peaks):
-            peak_list.append({
-                'position': int(peak_idx),
-                'height': float(signal_data[peak_idx]),
-                'height_normalized': float(normalized[peak_idx]),
-                'prominence': float(properties['prominences'][i]),
-                'width': float(properties.get('widths', [0])[i] if 'widths' in properties else 0),
-                'area': cls._calculate_peak_area(signal_data, peak_idx)
-            })
-        
-        return peak_list
-    
-    @classmethod
-    def _call_alleles(cls, peaks_data: Dict, size_standard: Dict) -> Dict[str, Dict]:
-        """
-        Llama alelos basándose en los picos detectados y el estándar de tamaños
-        """
-        alleles = {}
-        
-        # Calibración de tamaños si hay estándar disponible
-        size_calibration = size_standard.get('calibration', None)
-        
-        for marker_name, marker_info in cls.STR_MARKERS.items():
-            channel_key = f"channel_{marker_info['channel']}"
-            
-            if channel_key not in peaks_data:
-                continue
-            
-            # Buscar picos en el rango de tamaños del marcador
-            marker_peaks = []
-            for peak in peaks_data[channel_key]:
-                # Convertir posición a tamaño en bp
-                if size_calibration:
-                    size_bp = cls._position_to_size(peak['position'], size_calibration)
-                else:
-                    # Estimación aproximada sin calibración
-                    size_bp = peak['position'] * 0.5  # Factor aproximado
-                
-                # Verificar si está en el rango del marcador
-                if marker_info['size_range'][0] <= size_bp <= marker_info['size_range'][1]:
-                    marker_peaks.append({
-                        'size': size_bp,
-                        'height': peak['height'],
-                        'position': peak['position']
-                    })
-            
-            # Seleccionar los 2 picos más altos como alelos
-            if marker_peaks:
-                marker_peaks.sort(key=lambda x: x['height'], reverse=True)
-                
-                if len(marker_peaks) >= 2:
-                    allele1 = cls._size_to_allele(marker_peaks[0]['size'], 
-                                                 marker_info['repeat'])
-                    allele2 = cls._size_to_allele(marker_peaks[1]['size'], 
-                                                 marker_info['repeat'])
-                    alleles[marker_name] = {
-                        'allele1': allele1,
-                        'allele2': allele2,
-                        'peaks': marker_peaks[:2]
-                    }
-                elif len(marker_peaks) == 1:
-                    # Homocigoto
-                    allele1 = cls._size_to_allele(marker_peaks[0]['size'], 
-                                                 marker_info['repeat'])
-                    alleles[marker_name] = {
-                        'allele1': allele1,
-                        'allele2': allele1,
-                        'peaks': marker_peaks,
-                        'homozygote': True
-                    }
-        
-        return alleles
-    
-    @classmethod
-    def _calculate_quality_metrics(cls, channels: Dict, peaks_data: Dict) -> Dict:
-        """
-        Calcula métricas de calidad exhaustivas
-        """
-        metrics = {
-            'overall_quality': 'unknown',
-            'signal_strength': {},
-            'baseline_noise': {},
-            'resolution': {},
-            'peak_balance': {}
-        }
-        
-        for channel_name, channel_data in channels.items():
-            if 'raw_data' not in channel_data:
-                continue
-                
-            data = channel_data.get('analyzed_data', channel_data['raw_data'])
-            
-            # Intensidad de señal
-            metrics['signal_strength'][channel_name] = {
-                'max': float(np.max(data)),
-                'mean': float(np.mean(data)),
-                'std': float(np.std(data))
+        for channel_key, channel_data in channels.items():
+            formatted_channels[channel_key] = {
+                'dye_name': channel_data.get('dye_name', 'Unknown'),
+                'color': channel_data.get('color', 'unknown'),
+                'wavelength': channel_data.get('wavelength', 'unknown'),
+                'data_points': channel_data.get('data_points', 0),
+                'has_raw_data': 'raw_data' in channel_data,
+                'has_analyzed_data': 'analyzed_data' in channel_data,
+                'peak_count': 0  # Se actualizará después
             }
             
-            # Ruido de línea base
-            baseline_region = data[:int(len(data)*0.1)]  # Primeros 10%
-            metrics['baseline_noise'][channel_name] = float(np.std(baseline_region))
+            if 'purpose' in channel_data:
+                formatted_channels[channel_key]['purpose'] = channel_data['purpose']
+        
+        return formatted_channels
+    
+    @classmethod
+    def _calculate_quality_metrics(cls, channels: Dict, peaks_data: Dict, size_standard: Dict) -> Dict:
+        """
+        Calcula métricas de calidad comprensivas
+        """
+        quality_score = 100.0
+        issues = []
+        
+        # Verificar canales esperados
+        expected_channels = 4  # Esperamos al menos 4 canales de datos
+        detected_channels = sum(1 for ch in channels.values() if 'raw_data' in ch and ch['dye_name'] != 'LIZ')
+        
+        if detected_channels < expected_channels:
+            quality_score -= 20
+            issues.append(f"Solo {detected_channels} de {expected_channels} canales detectados")
+        
+        # Verificar estándar de tamaños
+        if size_standard.get('status') != 'calibrated':
+            quality_score -= 30
+            issues.append("Calibración de tamaños fallida")
+        elif size_standard.get('calibration', {}).get('r_squared', 0) < 0.98:
+            quality_score -= 10
+            issues.append("Calibración de tamaños imprecisa")
+        
+        # Verificar calidad de señal por canal
+        for channel_key, channel_data in channels.items():
+            if 'raw_data' not in channel_data or channel_data.get('dye_name') == 'LIZ':
+                continue
             
-            # Resolución entre picos
-            if channel_name in peaks_data and len(peaks_data[channel_name]) > 1:
-                peaks = sorted(peaks_data[channel_name], key=lambda x: x['position'])
-                min_distance = min(peaks[i+1]['position'] - peaks[i]['position'] 
-                                 for i in range(len(peaks)-1))
-                metrics['resolution'][channel_name] = min_distance
+            # Calcular SNR del canal
+            data = channel_data['raw_data']
+            if len(data) > 0:
+                baseline_noise = np.std(data[:int(len(data)*0.1)])
+                max_signal = np.max(data)
+                
+                if max_signal > 0:
+                    snr = max_signal / (baseline_noise + 1e-6)
+                    if snr < 10:
+                        quality_score -= 5
+                        issues.append(f"SNR bajo en {channel_data['dye_name']}")
+                
+                # Verificar saturación
+                if max_signal > 30000:  # Típico límite de saturación
+                    quality_score -= 10
+                    issues.append(f"Saturación detectada en {channel_data['dye_name']}")
         
-        # Calcular calidad general
-        avg_snr = np.mean([metrics['signal_strength'][ch]['max'] / 
-                          (metrics['baseline_noise'][ch] + 1e-6)
-                          for ch in metrics['baseline_noise']])
+        # Verificar picos detectados
+        total_peaks = sum(len(peaks) for peaks in peaks_data.values())
+        if total_peaks < 10:
+            quality_score -= 15
+            issues.append("Pocos picos detectados")
         
-        if avg_snr > 100:
-            metrics['overall_quality'] = 'excellent'
-        elif avg_snr > 50:
-            metrics['overall_quality'] = 'good'
-        elif avg_snr > 20:
-            metrics['overall_quality'] = 'acceptable'
-        else:
-            metrics['overall_quality'] = 'poor'
+        # Asegurar que el puntaje esté entre 0 y 100
+        quality_score = max(0, min(100, quality_score))
         
-        metrics['average_snr'] = float(avg_snr)
-        
-        return metrics
-    
-    # Métodos auxiliares
-    
-    @staticmethod
-    def _parse_date(date_data):
-        """Parsea fecha del formato ABIF"""
-        if not date_data:
-            return datetime.now().strftime("%Y-%m-%d")
-        # Implementar parsing específico según formato ABIF
-        return datetime.now().strftime("%Y-%m-%d")
-    
-    @staticmethod
-    def _parse_time(time_data):
-        """Parsea tiempo del formato ABIF"""
-        if not time_data:
-            return datetime.now().strftime("%H:%M:%S")
-        return datetime.now().strftime("%H:%M:%S")
-    
-    @staticmethod
-    def _get_channel_color(channel_num: int) -> str:
-        """Retorna el color asociado al canal"""
-        colors = {
-            1: '#1565C0',  # Azul (FAM)
-            2: '#2E7D32',  # Verde (VIC)
-            3: '#F57C00',  # Naranja (NED)
-            4: '#C62828',  # Rojo (PET)
-            5: '#FF6F00'   # Naranja oscuro (LIZ)
+        return {
+            'overall_quality': quality_score / 100.0,  # Normalizado a 0-1
+            'quality_score': quality_score,
+            'issues': issues,
+            'channels_detected': detected_channels,
+            'size_standard_status': size_standard.get('status', 'not_processed'),
+            'total_peaks': total_peaks,
+            'status': 'good' if quality_score >= 70 else 'warning' if quality_score >= 40 else 'poor'
         }
-        return colors.get(channel_num, '#757575')
-    
-    @staticmethod
-    def _calculate_peak_area(data: np.ndarray, peak_idx: int, 
-                           window: int = 10) -> float:
-        """Calcula el área bajo la curva del pico"""
-        start = max(0, peak_idx - window)
-        end = min(len(data), peak_idx + window)
-        return float(np.trapz(data[start:end]))
-    
-    @staticmethod
-    def _position_to_size(position: int, calibration: Dict) -> float:
-        """Convierte posición de scan a tamaño en bp usando calibración"""
-        if 'slope' in calibration and 'intercept' in calibration:
-            return position * calibration['slope'] + calibration['intercept']
-        return position * 0.5  # Estimación por defecto
-    
-    @staticmethod
-    def _size_to_allele(size_bp: float, repeat_length: int) -> str:
-        """Convierte tamaño en bp a nomenclatura de alelo"""
-        # Cálculo simplificado - en producción usar tabla de referencia
-        allele_number = round(size_bp / repeat_length)
-        remainder = size_bp % repeat_length
-        
-        if abs(remainder) < 0.5:
-            return str(allele_number)
-        elif remainder > 0:
-            return f"{allele_number}.{int(remainder)}"
-        else:
-            return str(allele_number)
     
     @staticmethod
     def _create_error_response(filename: str, error_msg: str) -> Dict:
@@ -442,76 +370,8 @@ class EnhancedFSAParser:
             'channels': {},
             'peaks': {},
             'alleles': {},
-            'quality_metrics': {'overall_quality': 'error'}
+            'quality_metrics': {'overall_quality': 0, 'status': 'error'}
         }
-    
-    @classmethod
-    def _process_size_standard(cls, raw_data: Dict) -> Dict:
-        """Procesa el estándar de tamaños (LIZ)"""
-        # Buscar datos del canal LIZ (usualmente DATA105 o DATA5)
-        liz_data = None
-        for key in ['DATA105', 'DATA5']:
-            if key in raw_data:
-                liz_data = np.array(raw_data[key])
-                break
-        
-        if liz_data is None:
-            return {'status': 'not_found'}
-        
-        # Detectar picos en el estándar
-        peaks = cls._advanced_peak_detection(liz_data, min_height_ratio=0.1)
-        
-        # Tamaños esperados para LIZ-500
-        expected_sizes = [35, 50, 75, 100, 139, 150, 160, 200, 250, 
-                         300, 340, 350, 400, 450, 490, 500]
-        
-        # Emparejar picos detectados con tamaños esperados
-        if len(peaks) >= len(expected_sizes) * 0.8:  # Al menos 80% detectados
-            # Ordenar picos por posición
-            peaks.sort(key=lambda x: x['position'])
-            
-            # Crear calibración lineal simple
-            positions = [p['position'] for p in peaks[:len(expected_sizes)]]
-            
-            # Regresión lineal
-            coeffs = np.polyfit(positions, expected_sizes[:len(positions)], 1)
-            
-            return {
-                'status': 'calibrated',
-                'peaks': peaks,
-                'expected_sizes': expected_sizes,
-                'calibration': {
-                    'slope': float(coeffs[0]),
-                    'intercept': float(coeffs[1]),
-                    'r_squared': 0.99  # Calcular R² real en producción
-                }
-            }
-        
-        return {
-            'status': 'insufficient_peaks',
-            'peaks': peaks,
-            'expected_sizes': expected_sizes
-        }
-    
-    @staticmethod
-    def _filter_peaks_by_quality(data: np.ndarray, peaks: List[Dict], 
-                               min_snr: float = 3.0) -> List[Dict]:
-        """Filtra picos por criterios de calidad"""
-        if not peaks:
-            return []
-        
-        # Calcular ruido de fondo
-        baseline_std = np.std(data[:int(len(data)*0.1)])
-        
-        # Filtrar por SNR
-        filtered = []
-        for peak in peaks:
-            snr = peak['height'] / (baseline_std + 1e-6)
-            if snr >= min_snr:
-                peak['snr'] = float(snr)
-                filtered.append(peak)
-        
-        return filtered
     
     @staticmethod
     def _read_abif_header(stream: io.BytesIO) -> Dict:
@@ -530,94 +390,99 @@ class EnhancedFSAParser:
         
         return header
     
-    @staticmethod
-    def _read_directory_entries(stream: io.BytesIO, header: Dict) -> List[Dict]:
-        """Lee las entradas del directorio ABIF"""
-        entries = []
+    @classmethod
+    def _read_abif_directory(cls, stream: io.BytesIO, header: Dict) -> Dict:
+        """Lee el directorio de tags ABIF"""
+        raw_data = {}
+        
+        # Ir al directorio
         stream.seek(header['dir_offset'])
         
         for _ in range(header['dir_count']):
-            entry = {
-                'name': stream.read(4).decode('ascii', errors='ignore'),
-                'number': struct.unpack('>I', stream.read(4))[0],
-                'element_type': struct.unpack('>H', stream.read(2))[0],
-                'element_size': struct.unpack('>H', stream.read(2))[0],
-                'num_elements': struct.unpack('>I', stream.read(4))[0],
-                'data_size': struct.unpack('>I', stream.read(4))[0],
-                'data_offset': struct.unpack('>I', stream.read(4))[0]
-            }
-            entries.append(entry)
+            # Leer entrada del directorio (28 bytes)
+            tag_name = stream.read(4).decode('ascii', errors='ignore')
+            tag_num = struct.unpack('>I', stream.read(4))[0]
+            elem_type = struct.unpack('>H', stream.read(2))[0]
+            elem_size = struct.unpack('>H', stream.read(2))[0]
+            num_elems = struct.unpack('>I', stream.read(4))[0]
+            data_size = struct.unpack('>I', stream.read(4))[0]
+            data_offset = struct.unpack('>I', stream.read(4))[0]
+            
+            # Construir clave del tag
+            tag_key = tag_name.strip() + str(tag_num) if tag_num > 1 else tag_name.strip()
+            
+            # Leer datos si es un tag importante
+            if tag_key in cls.IMPORTANT_TAGS or tag_key.startswith('DATA'):
+                current_pos = stream.tell()
+                
+                if data_size <= 4:
+                    # Datos almacenados directamente en el offset
+                    raw_data[tag_key] = data_offset
+                else:
+                    # Datos almacenados en otra ubicación
+                    stream.seek(data_offset)
+                    raw_data[tag_key] = stream.read(data_size)
+                
+                stream.seek(current_pos)
         
-        return entries
-    
-    @classmethod
-    def _extract_metadata(cls, stream: io.BytesIO, directories: List[Dict]) -> Dict:
-        """Extrae metadatos del archivo"""
-        metadata = {
-            'sample_name': 'Unknown',
-            'instrument': 'Unknown',
-            'run_date': datetime.now().strftime("%Y-%m-%d"),
-            'dye_set': 'Unknown'
-        }
-        
-        # Buscar tags de metadatos
-        for entry in directories:
-            if entry['name'] == 'SMPL' and entry['number'] == 1:
-                metadata['sample_name'] = cls._read_string(stream, entry)
-            elif entry['name'] == 'MODL' and entry['number'] == 1:
-                metadata['instrument'] = cls._read_string(stream, entry)
-            elif entry['name'] == 'DySN' and entry['number'] == 1:
-                metadata['dye_set'] = cls._read_string(stream, entry)
-        
-        return metadata
-    
-    @classmethod
-    def _extract_channel_data(cls, stream: io.BytesIO, 
-                            directories: List[Dict]) -> Dict:
-        """Extrae datos de los canales"""
-        channels = {}
-        
-        # Buscar datos de canales
-        for entry in directories:
-            if entry['name'].startswith('DATA'):
-                try:
-                    channel_num = int(entry['name'][4:])
-                    if 1 <= channel_num <= 5:
-                        data = cls._read_numeric_array(stream, entry)
-                        channels[f'channel_{channel_num}'] = {
-                            'raw_data': data,
-                            'color': cls._get_channel_color(channel_num)
-                        }
-                except ValueError:
-                    continue
-        
-        return channels
+        return raw_data
     
     @staticmethod
-    def _read_string(stream: io.BytesIO, entry: Dict) -> str:
-        """Lee un string del archivo ABIF"""
-        stream.seek(entry['data_offset'])
-        data = stream.read(entry['data_size'])
-        return data.decode('ascii', errors='ignore').strip('\x00')
+    def _parse_data_array(data: bytes) -> np.ndarray:
+        """Parsea un array de datos del formato ABIF"""
+        if isinstance(data, int):
+            return np.array([data])
+        
+        # Asumir datos de 16 bits (común en FSA)
+        num_points = len(data) // 2
+        return np.frombuffer(data, dtype='>i2', count=num_points)
     
     @staticmethod
-    def _read_numeric_array(stream: io.BytesIO, entry: Dict) -> np.ndarray:
-        """Lee un array numérico del archivo ABIF"""
-        stream.seek(entry['data_offset'])
+    def _decode_pascal_string(data: bytes) -> str:
+        """Decodifica una cadena Pascal (longitud + datos)"""
+        if not data or len(data) < 1:
+            return ""
         
-        # Determinar tipo de datos
-        if entry['element_type'] == 4:  # int16
-            dtype = '>i2'
-        elif entry['element_type'] == 5:  # int32  
-            dtype = '>i4'
-        else:
-            dtype = '>i2'  # Por defecto
+        length = data[0]
+        if length > len(data) - 1:
+            return ""
         
-        # Leer datos
-        data = np.frombuffer(
-            stream.read(entry['data_size']), 
-            dtype=dtype,
-            count=entry['num_elements']
-        )
+        return data[1:1+length].decode('ascii', errors='ignore')
+    
+    @staticmethod
+    def _parse_date(date_obj) -> str:
+        """Parsea fecha del formato BioPython"""
+        if date_obj is None:
+            return "Unknown"
         
-        return data
+        if hasattr(date_obj, 'strftime'):
+            return date_obj.strftime('%Y-%m-%d')
+        
+        return str(date_obj)
+    
+    @staticmethod
+    def _parse_time(time_obj) -> str:
+        """Parsea tiempo del formato BioPython"""
+        if time_obj is None:
+            return "Unknown"
+        
+        if hasattr(time_obj, 'strftime'):
+            return time_obj.strftime('%H:%M:%S')
+        
+        return str(time_obj)
+    
+    @staticmethod
+    def _parse_date_internal(date_data) -> str:
+        """Parsea fecha del formato interno ABIF"""
+        if date_data is None:
+            return "Unknown"
+        
+        # Implementar parsing específico según formato ABIF
+        return "Unknown"
+    
+    @staticmethod
+    def _get_channel_color(channel_num: int) -> str:
+        """Obtiene el color asociado al canal"""
+        colors = {1: 'blue', 2: 'green', 3: 'yellow', 4: 'red', 5: 'orange'}
+        return colors.get(channel_num, 'unknown')
+    
