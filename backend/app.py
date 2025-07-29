@@ -14,6 +14,65 @@ from datetime import datetime
 import numpy as np
 from decimal import Decimal
 import io
+import os
+import pickle
+from pathlib import Path
+
+# Directorio para persistencia
+DATA_DIR = Path("./genotyper_data")
+DATA_DIR.mkdir(exist_ok=True)
+
+# Archivos de persistencia
+PROJECTS_FILE = DATA_DIR / "projects.json"
+SAMPLES_FILE = DATA_DIR / "samples.json"
+CACHE_FILE = DATA_DIR / "analysis_cache.pkl"
+
+def load_data():
+    """Cargar datos persistidos"""
+    global projects, samples, analysis_cache
+    
+    try:
+        # Cargar proyectos
+        if PROJECTS_FILE.exists():
+            with open(PROJECTS_FILE, 'r') as f:
+                projects = json.load(f)
+            print(f"✅ Cargados {len(projects)} proyectos")
+        
+        # Cargar muestras
+        if SAMPLES_FILE.exists():
+            with open(SAMPLES_FILE, 'r') as f:
+                samples = json.load(f)
+            print(f"✅ Cargadas {len(samples)} muestras")
+        
+        # Cargar caché de análisis
+        if CACHE_FILE.exists():
+            with open(CACHE_FILE, 'rb') as f:
+                analysis_cache = pickle.load(f)
+            print(f"✅ Cargados {len(analysis_cache)} análisis en caché")
+                
+    except Exception as e:
+        print(f"⚠️  Error cargando datos: {e}")
+        print("   Iniciando con datos vacíos")
+
+def save_data():
+    """Guardar datos a disco"""
+    try:
+        # Guardar proyectos
+        with open(PROJECTS_FILE, 'w') as f:
+            json.dump(projects, f, indent=2, default=str)
+        
+        # Guardar muestras
+        with open(SAMPLES_FILE, 'w') as f:
+            json.dump(samples, f, indent=2, default=str)
+        
+        # Guardar caché (usar pickle para numpy arrays)
+        with open(CACHE_FILE, 'wb') as f:
+            pickle.dump(analysis_cache, f)
+            
+        print("💾 Datos guardados exitosamente")
+        
+    except Exception as e:
+        print(f"❌ Error guardando datos: {e}")
 
 # Importar el parser mejorado
 try:
@@ -136,11 +195,14 @@ async def create_project(name: str = Form(...), description: str = Form("")):
         
         projects[project_id] = project
         
+        autosave()
+
         return {
             "success": True,
             "project": project,
             "message": f"Proyecto '{name}' creado exitosamente"
         }
+        
         
     except HTTPException:
         raise
@@ -159,20 +221,45 @@ async def list_projects():
 
 @app.get("/api/projects/{project_id}")
 async def get_project(project_id: str):
-    """Obtener detalles de un proyecto específico"""
+    """Obtener detalles de un proyecto específico con datos completos de FSA"""
     if project_id not in projects:
         raise HTTPException(404, "Proyecto no encontrado")
     
     project = projects[project_id]
-    # Agregar información de muestras
-    project_samples = [s for s in samples.values() if s.get("project_id") == project_id]
+    
+    # Obtener información completa de las muestras incluyendo datos FSA
+    project_samples = []
+    for sample in samples.values():
+        if sample.get("project_id") == project_id:
+            # Crear copia de la muestra
+            sample_with_fsa = sample.copy()
+            
+            # Agregar datos FSA si están en caché
+            if sample["id"] in analysis_cache:
+                fsa_data = analysis_cache[sample["id"]]
+                sample_with_fsa["fsa_data"] = {
+                    "channels": fsa_data.get("channels", {}),
+                    "alleles": fsa_data.get("alleles", {}),
+                    "peaks": fsa_data.get("peaks", {}),
+                    "quality_metrics": fsa_data.get("quality_metrics", {})
+                }
+                
+                # Actualizar conteo de canales con información real
+                sample_with_fsa["metadata"]["channels"] = len([
+                    ch for ch in fsa_data.get("channels", {}).values() 
+                    if ch.get("has_raw_data", False)
+                ])
+                
+                # Actualizar calidad
+                sample_with_fsa["metadata"]["quality_score"] = fsa_data.get("quality_metrics", {}).get("overall_quality", 0)
+            
+            project_samples.append(sample_with_fsa)
     
     # Calcular estadísticas
     loci_detected = set()
     for sample in project_samples:
-        if sample["id"] in analysis_cache:
-            alleles = analysis_cache[sample["id"]].get("alleles", {})
-            loci_detected.update(alleles.keys())
+        if sample.get("fsa_data") and sample["fsa_data"].get("alleles"):
+            loci_detected.update(sample["fsa_data"]["alleles"].keys())
     
     return {
         "success": True,
@@ -215,6 +302,8 @@ async def upload_samples(
             
             tasks.append(process_single_file(file, project_id))
         
+        autosave()
+        
         # Ejecutar análisis en paralelo
         if tasks:
             processed_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -255,24 +344,16 @@ async def upload_samples(
         raise HTTPException(500, f"Error al procesar archivos: {str(e)}")
 
 async def process_single_file(file: UploadFile, project_id: str) -> Dict:
-    """Procesar un archivo FSA/AB1 individual"""
+    """Procesar un solo archivo FSA"""
     try:
-        # Leer contenido del archivo
+        # Leer contenido
         content = await file.read()
         
-        if not content:
+        if len(content) == 0:
             return {
                 "success": False,
                 "filename": file.filename,
                 "error": "Archivo vacío"
-            }
-        
-        # Usar el parser mejorado
-        if not EnhancedFSAParser:
-            return {
-                "success": False,
-                "filename": file.filename,
-                "error": "Parser FSA no disponible"
             }
         
         # Analizar archivo
@@ -285,7 +366,7 @@ async def process_single_file(file: UploadFile, project_id: str) -> Dict:
                 "error": analysis_result.get("error", "Error desconocido en el análisis")
             }
         
-        # Crear registro de muestra
+        # Crear registro de muestra con estructura correcta
         sample_id = str(uuid.uuid4())
         sample = {
             "id": sample_id,
@@ -294,8 +375,15 @@ async def process_single_file(file: UploadFile, project_id: str) -> Dict:
             "file_size": len(content),
             "uploaded_at": datetime.now().isoformat(),
             "status": "analyzed",
-            "metadata": analysis_result.get("metadata", {}),
-            "quality": analysis_result.get("quality_metrics", {}).get("overall_quality", "unknown"),
+            "metadata": {
+                **analysis_result.get("metadata", {}),
+                "quality_score": analysis_result.get("quality_metrics", {}).get("overall_quality", 0),
+                "channels": len([
+                    ch for ch in analysis_result.get("channels", {}).values()
+                    if ch.get("has_raw_data", False)
+                ])
+            },
+            "quality": analysis_result.get("quality_metrics", {}).get("overall_quality", 0),
             "alleles_detected": len(analysis_result.get("alleles", {})),
             "channels": len(analysis_result.get("channels", {}))
         }
@@ -304,6 +392,11 @@ async def process_single_file(file: UploadFile, project_id: str) -> Dict:
         samples[sample_id] = sample
         analysis_cache[sample_id] = analysis_result
         
+        # Actualizar proyecto
+        if project_id in projects:
+            if sample_id not in projects[project_id]["samples"]:
+                projects[project_id]["samples"].append(sample_id)
+        
         return {
             "success": True,
             "sample": sample,
@@ -311,7 +404,7 @@ async def process_single_file(file: UploadFile, project_id: str) -> Dict:
                 "channels_detected": len(analysis_result.get("channels", {})),
                 "peaks_detected": sum(len(peaks) for peaks in analysis_result.get("peaks", {}).values()),
                 "alleles_called": len(analysis_result.get("alleles", {})),
-                "quality": analysis_result.get("quality_metrics", {}).get("overall_quality", "unknown")
+                "quality": analysis_result.get("quality_metrics", {}).get("overall_quality", 0)
             }
         }
         
@@ -326,40 +419,29 @@ async def process_single_file(file: UploadFile, project_id: str) -> Dict:
 
 @app.get("/api/samples/{sample_id}")
 async def get_sample_details(sample_id: str):
-    """Obtener detalles completos de una muestra"""
+    """Obtener detalles completos de una muestra incluyendo datos FSA"""
     if sample_id not in samples:
-        raise HTTPException(404, "Muestra no encontrada")
+        raise HTTPException(404, f"Muestra no encontrada: {sample_id}")
     
-    sample = samples[sample_id]
-    analysis = analysis_cache.get(sample_id, {})
+    sample = samples[sample_id].copy()
     
-    # Función helper para limpiar datos no serializables
-    def make_serializable(obj):
-        """Convierte objetos no serializables a tipos básicos de Python"""
-        if obj is None:
-            return None
-        elif isinstance(obj, (str, int, float, bool)):
-            return obj
-        elif isinstance(obj, dict):
-            return {k: make_serializable(v) for k, v in obj.items()}
-        elif isinstance(obj, (list, tuple)):
-            return [make_serializable(item) for item in obj]
-        elif hasattr(obj, 'tolist'):  # Arrays numpy
-            return obj.tolist()
-        elif hasattr(obj, '__dict__'):  # Objetos con atributos
-            return make_serializable(obj.__dict__)
-        else:
-            # Para otros tipos, convertir a string como fallback
-            return str(obj)
-    
-    # Limpiar los datos antes de enviarlos
-    clean_analysis = make_serializable(analysis)
-    clean_sample = make_serializable(sample)
+    # Agregar datos completos del análisis FSA
+    if sample_id in analysis_cache:
+        fsa_data = analysis_cache[sample_id]
+        sample["fsa_data"] = {
+            "channels": fsa_data.get("channels", {}),
+            "alleles": fsa_data.get("alleles", {}),
+            "peaks": fsa_data.get("peaks", {}),
+            "quality_metrics": fsa_data.get("quality_metrics", {}),
+            "size_standard": fsa_data.get("size_standard", {}),
+            "str_markers": fsa_data.get("str_markers", {})
+        }
+    else:
+        sample["fsa_data"] = None
     
     return {
         "success": True,
-        "sample": clean_sample,
-        "analysis": clean_analysis
+        "sample": sample
     }
 
 @app.put("/api/samples/{sample_id}/alleles")
@@ -381,11 +463,14 @@ async def update_sample_alleles(sample_id: str, alleles: Dict[str, Dict]):
         samples[sample_id]["status"] = "manually_reviewed"
         samples[sample_id]["reviewed_at"] = datetime.now().isoformat()
         
+        autosave()
+
         return {
             "success": True,
             "message": "Alelos actualizados exitosamente",
             "alleles": alleles
         }
+        
         
     except HTTPException:
         raise
@@ -701,6 +786,8 @@ async def delete_sample(sample_id: str):
         if sample_id in analysis_cache:
             del analysis_cache[sample_id]
         
+        autosave()
+        
         return {
             "success": True,
             "message": "Muestra eliminada exitosamente"
@@ -711,21 +798,54 @@ async def delete_sample(sample_id: str):
     except Exception as e:
         print(f"Error eliminando muestra: {str(e)}")
         raise HTTPException(500, f"Error al eliminar muestra: {str(e)}")
+    
+@app.post("/api/admin/save")
+async def save_data_endpoint():
+    """Guardar datos manualmente"""
+    save_data()
+    return {
+        "success": True,
+        "message": "Datos guardados exitosamente",
+        "stats": {
+            "projects": len(projects),
+            "samples": len(samples),
+            "analyses": len(analysis_cache)
+        }
+    }
+
+# Agregar autosave después de operaciones importantes
+def autosave():
+    """Guardar datos automáticamente"""
+    try:
+        save_data()
+    except:
+        pass  # No interrumpir operaciones si falla el guardado
 
 @app.on_event("startup")
 async def startup_event():
     """Inicialización del servidor"""
-    print("=" * 50)
+    print("=" * 60)
+    print("🧬 Iniciando GenotypeR Backend")
+    print("URL: http://localhost:8888")
+    print("Docs: http://localhost:8888/docs")
+    print("=" * 60)
+    
+    # Cargar datos persistidos
+    load_data()
+    
+    print("=" * 60)
     print("GenotypeR Backend API v2.0")
     print(f"Parser disponible: {PARSER_AVAILABLE}")
     print("Servidor iniciado correctamente")
-    print("=" * 50)
+    print("=" * 60)
 
+# Modificar el evento de cierre para guardar datos
 @app.on_event("shutdown")
 async def shutdown_event():
     """Limpieza al cerrar"""
-    print("Cerrando servidor...")
-    # Aquí se podría guardar el estado si fuera necesario
+    print("\n🛑 Cerrando servidor...")
+    save_data()
+    print("✅ Servidor cerrado correctamente")
 
 if __name__ == "__main__":
     print("="*60)
