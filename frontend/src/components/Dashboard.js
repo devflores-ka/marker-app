@@ -136,24 +136,43 @@ const Dashboard = () => {
   };
 
   const loadProjectDetails = async (projectId) => {
-    try {
-      const response = await fetch(`http://localhost:8888/api/projects/${projectId}`);
-      if (response.ok) {
-        const data = await response.json();
-        setSamples(data.samples_data || []);
-        setProjectStats(data.metadata || {});
-        
-        // Cargar matriz de alelos
+  try {
+    const response = await fetch(`http://localhost:8888/api/projects/${projectId}`);
+    if (response.ok) {
+      const data = await response.json();
+      setSamples(data.samples_data || []);
+      setProjectStats(data.metadata || {});
+      
+      // Cargar matriz de alelos con debugging
+      try {
         const matrixResponse = await fetch(`http://localhost:8888/api/projects/${projectId}/allele_matrix`);
         if (matrixResponse.ok) {
           const matrixData = await matrixResponse.json();
+          
+          // DEBUGGING: Ver la estructura real de los datos
+          console.log('=== ESTRUCTURA DE ALLELE MATRIX ===');
+          console.log('matrixData:', matrixData);
+          console.log('matrixData.matrix:', matrixData.matrix);
+          if (matrixData.matrix && matrixData.matrix.samples && matrixData.matrix.samples[0]) {
+            console.log('Primer sample:', matrixData.matrix.samples[0]);
+            console.log('Alleles del primer sample:', matrixData.matrix.samples[0].alleles);
+          }
+          console.log('================================');
+          
           setAlleleMatrix(matrixData);
+        } else {
+          console.warn('No se pudo cargar la matriz de alelos:', matrixResponse.status);
+          setAlleleMatrix(null);
         }
+      } catch (matrixError) {
+        console.warn('Error cargando matriz de alelos:', matrixError);
+        setAlleleMatrix(null);
       }
-    } catch (error) {
-      showNotification('Error cargando detalles del proyecto', 'error');
     }
-  };
+  } catch (error) {
+    showNotification('Error cargando detalles del proyecto', 'error');
+  }
+};
 
   // Funciones para archivos
   const handleFileUpload = async () => {
@@ -807,7 +826,7 @@ const Dashboard = () => {
       </Card>
 
       {/* Matriz de alelos */}
-      {alleleMatrix && alleleMatrix.loci.length > 0 && (
+      {alleleMatrix && alleleMatrix.matrix && alleleMatrix.matrix.markers && alleleMatrix.matrix.markers.length > 0 && (
         <Card>
           <CardContent>
             <Typography variant="h6" gutterBottom sx={{ display: 'flex', alignItems: 'center' }}>
@@ -820,24 +839,24 @@ const Dashboard = () => {
                 <TableHead>
                   <TableRow>
                     <TableCell>Muestra</TableCell>
-                    {alleleMatrix.loci.map((locus) => (
-                      <TableCell key={locus} align="center">{locus}</TableCell>
+                    {alleleMatrix.matrix.markers.map((marker) => (
+                      <TableCell key={marker} align="center">{marker}</TableCell>
                     ))}
                   </TableRow>
                 </TableHead>
                 <TableBody>
-                  {alleleMatrix.samples.map((sample) => (
-                    <TableRow key={sample.sample_id}>
+                  {alleleMatrix.matrix.samples.map((sample, index) => (
+                    <TableRow key={sample.sample_name || index}>
                       <TableCell>
                         <Typography variant="body2" fontWeight="medium">
-                          {sample.filename}
+                          {sample.sample_name}
                         </Typography>
                       </TableCell>
-                      {alleleMatrix.loci.map((locus) => (
-                        <TableCell key={locus} align="center">
-                          {sample[locus] ? (
+                      {alleleMatrix.matrix.markers.map((marker) => (
+                        <TableCell key={marker} align="center">
+                          {sample.alleles && sample.alleles[marker] ? (
                             <Chip 
-                              label={sample[locus]} 
+                              label={`${sample.alleles[marker].allele1 || '?'}/${sample.alleles[marker].allele2 || '?'}`} 
                               size="small" 
                               color="primary"
                               variant="outlined"
@@ -991,15 +1010,19 @@ const Dashboard = () => {
           borderBottom: 1,
           borderColor: 'divider'
         }}>
-          <Typography variant="h5" sx={{ display: 'flex', alignItems: 'center' }}>
+          <Box sx={{ display: 'flex', alignItems: 'center' }}>
             <Science sx={{ mr: 1 }} />
-            Análisis de Electroferograma
-            {selectedSampleId && samples.find(s => s.id === selectedSampleId) && (
-              <Typography variant="subtitle1" sx={{ ml: 2, color: 'text.secondary' }}>
-                - {samples.find(s => s.id === selectedSampleId).filename}
+            <Box>
+              <Typography variant="h5">
+                Análisis de Electroferograma
               </Typography>
-            )}
-          </Typography>
+              {selectedSampleId && samples.find(s => s.id === selectedSampleId) && (
+                <Typography variant="subtitle1" sx={{ color: 'text.secondary' }}>
+                  {samples.find(s => s.id === selectedSampleId).filename}
+                </Typography>
+              )}
+            </Box>
+          </Box>
           <IconButton onClick={handleCloseViewer}>
             <Close />
           </IconButton>

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import Plot from 'react-plotly.js';
 import { 
   Box, 
@@ -41,20 +41,12 @@ import {
   CardContent
 } from '@mui/material';
 import {
-  ZoomIn,
-  ZoomOut,
   RestartAlt,
   Edit,
   Save,
-  Cancel,
-  CheckCircle,
-  Warning,
-  VisibilityOutlined,
-  VisibilityOffOutlined,
   InfoOutlined,
   ExpandMore,
   Science,
-  BubbleChart,
   Assessment,
   Timeline,
   Storage,
@@ -97,9 +89,10 @@ export default function ComprehensiveElectropherogramViewer({ sampleId, onUpdate
   const [selectedChannel, setSelectedChannel] = useState('all');
   const [selectedMarker, setSelectedMarker] = useState('');
   const [showPeaks, setShowPeaks] = useState(true);
-  const [showSizeStandard, setShowSizeStandard] = useState(false);
+  const [showSizeStandard, setShowSizeStandard] = useState(true);
   const [showRawData, setShowRawData] = useState(true);
   const [showAnalyzedData, setShowAnalyzedData] = useState(false);
+  const [showAlleles, setShowAlleles] = useState(true);
   const [peakThreshold, setPeakThreshold] = useState(50);
   const [zoomRegion, setZoomRegion] = useState(null);
   
@@ -110,33 +103,99 @@ export default function ComprehensiveElectropherogramViewer({ sampleId, onUpdate
 
   // Cargar datos
   useEffect(() => {
-    loadSampleData();
+    const loadData = async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        
+        // Primero cargar los datos básicos
+        const response = await fetch(`http://localhost:8888/api/samples/${sampleId}`);
+        if (!response.ok) throw new Error('Error cargando datos');
+        
+        const data = await response.json();
+        console.log('Datos básicos cargados:', data);
+        
+        // Cargar los datos de los canales
+        const channelsWithData = {};
+        
+        // Intentar cargar todos los datos de una vez primero
+        try {
+          const rawDataResponse = await fetch(`http://localhost:8888/api/samples/${sampleId}/raw_data`);
+          if (rawDataResponse.ok) {
+            const rawData = await rawDataResponse.json();
+            console.log('Datos crudos de todos los canales:', rawData);
+            
+            // Si tenemos los datos, usarlos
+            if (rawData.channels) {
+              for (const [channelKey, channelData] of Object.entries(rawData.channels)) {
+                channelsWithData[channelKey] = {
+                  ...channelData.info,
+                  raw_data: channelData.raw_data || [],
+                  analyzed_data: channelData.analyzed_data || []
+                };
+              }
+            }
+          }
+        } catch (err) {
+          console.log('No se pudieron cargar todos los datos de una vez, intentando canal por canal');
+        }
+        
+        // Si no tenemos datos completos, cargar canal por canal
+        if (Object.keys(channelsWithData).length === 0 && data.analysis?.channels) {
+          for (const [channelKey, channelInfo] of Object.entries(data.analysis.channels)) {
+            if (channelInfo.has_raw_data || channelInfo.has_analyzed_data) {
+              try {
+                const channelDataResponse = await fetch(`http://localhost:8888/api/samples/${sampleId}/channel/${channelKey}`);
+                if (channelDataResponse.ok) {
+                  const channelData = await channelDataResponse.json();
+                  console.log(`Datos del canal ${channelKey}:`, channelData);
+                  channelsWithData[channelKey] = {
+                    ...channelInfo,
+                    raw_data: channelData.raw_data || [],
+                    analyzed_data: channelData.analyzed_data || []
+                  };
+                } else {
+                  console.log(`No se pudieron cargar datos del canal ${channelKey}`);
+                  channelsWithData[channelKey] = channelInfo;
+                }
+              } catch (err) {
+                console.error(`Error cargando datos del canal ${channelKey}:`, err);
+                channelsWithData[channelKey] = channelInfo;
+              }
+            } else {
+              channelsWithData[channelKey] = channelInfo;
+            }
+          }
+        }
+        
+        // Actualizar los datos con los canales cargados
+        if (Object.keys(channelsWithData).length > 0) {
+          data.analysis.channels = channelsWithData;
+        }
+        
+        console.log('Datos finales con canales:', data.analysis);
+        setSampleData(data.analysis);
+        setEditedAlleles(data.analysis.alleles || {});
+      } catch (err) {
+        setError(err.message);
+      } finally {
+        setLoading(false);
+      }
+    };
+    
+    loadData();
   }, [sampleId]);
-
-  const loadSampleData = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      
-      const response = await fetch(`http://localhost:8888/api/samples/${sampleId}`);
-      if (!response.ok) throw new Error('Error cargando datos');
-      
-      const data = await response.json();
-      setSampleData(data.analysis);
-      setEditedAlleles(data.analysis.alleles || {});
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
 
   // Preparar datos para el gráfico
   const prepareTraces = () => {
-    if (!sampleData?.channels) return [];
+    if (!sampleData?.channels) {
+      console.log('No hay datos de canales:', sampleData);
+      return [];
+    }
     
     const traces = [];
     const channels = sampleData.channels;
+    console.log('Canales disponibles:', Object.keys(channels));
     
     Object.entries(channels).forEach(([channelKey, channelData]) => {
       if (selectedChannel !== 'all' && selectedChannel !== channelKey) return;
@@ -145,8 +204,9 @@ export default function ComprehensiveElectropherogramViewer({ sampleId, onUpdate
       const color = channelData.color || '#666666';
       
       // Datos crudos
-      if (showRawData && channelData.raw_data) {
+      if (showRawData && channelData.raw_data && channelData.raw_data.length > 0) {
         const data = channelData.raw_data;
+        console.log(`Canal ${channelNum} - Datos crudos:`, data.length, 'puntos');
         traces.push({
           x: Array.from({ length: data.length }, (_, i) => i),
           y: data,
@@ -157,11 +217,14 @@ export default function ComprehensiveElectropherogramViewer({ sampleId, onUpdate
           opacity: showAnalyzedData ? 0.5 : 1,
           visible: true
         });
+      } else if (showRawData) {
+        console.log(`Canal ${channelNum} - NO tiene raw_data disponibles`);
       }
       
       // Datos analizados
       if (showAnalyzedData && channelData.analyzed_data) {
         const data = channelData.analyzed_data;
+        console.log(`Canal ${channelNum} - Datos analizados:`, data.length, 'puntos');
         traces.push({
           x: Array.from({ length: data.length }, (_, i) => i),
           y: data,
@@ -178,29 +241,31 @@ export default function ComprehensiveElectropherogramViewer({ sampleId, onUpdate
         const data = channelData.analyzed_data || channelData.raw_data;
         const peaks = sampleData.peaks[channelKey].filter(p => p.height >= peakThreshold);
         
-        traces.push({
-          x: peaks.map(p => p.position),
-          y: peaks.map(p => data[p.position]),
-          type: 'scatter',
-          mode: 'markers+text',
-          name: `Picos Canal ${channelNum}`,
-          marker: { 
-            color: color,
-            size: 10,
-            symbol: 'triangle-up',
-            line: { color: 'white', width: 1 }
-          },
-          text: peaks.map(p => `${p.height.toFixed(0)}\nSNR: ${p.snr?.toFixed(1) || 'N/A'}`),
-          textposition: 'top center',
-          textfont: { size: 9 },
-          hovertemplate: 
-            'Pico #%{pointNumber}<br>' +
-            'Posición: %{x}<br>' +
-            'Altura: %{text}<br>' +
-            'Prominencia: %{customdata[0]:.1f}<br>' +
-            'Ancho: %{customdata[1]:.1f}<extra></extra>',
-          customdata: peaks.map(p => [p.prominence || 0, p.width || 0])
-        });
+        if (data && data.length > 0) {
+          traces.push({
+            x: peaks.map(p => p.position),
+            y: peaks.map(p => data[p.position] || 0),
+            type: 'scatter',
+            mode: 'markers+text',
+            name: `Picos Canal ${channelNum}`,
+            marker: { 
+              color: color,
+              size: 10,
+              symbol: 'triangle-up',
+              line: { color: 'white', width: 1 }
+            },
+            text: peaks.map(p => `${p.height.toFixed(0)}\nSNR: ${p.snr?.toFixed(1) || 'N/A'}`),
+            textposition: 'top center',
+            textfont: { size: 9 },
+            hovertemplate: 
+              'Pico #%{pointNumber}<br>' +
+              'Posición: %{x}<br>' +
+              'Altura: %{text}<br>' +
+              'Prominencia: %{customdata[0]:.1f}<br>' +
+              'Ancho: %{customdata[1]:.1f}<extra></extra>',
+            customdata: peaks.map(p => [p.prominence || 0, p.width || 0])
+          });
+        }
       }
     });
     
@@ -209,20 +274,105 @@ export default function ComprehensiveElectropherogramViewer({ sampleId, onUpdate
       const lizPeaks = sampleData.size_standard.peaks;
       const expectedSizes = sampleData.size_standard.expected_sizes || [];
       
-      traces.push({
-        x: lizPeaks.map(p => p.position),
-        y: lizPeaks.map(p => p.height),
-        type: 'scatter',
-        mode: 'markers+text',
-        name: 'LIZ-500',
-        marker: { 
-          color: '#FF6F00',
-          size: 12,
-          symbol: 'diamond',
-          line: { color: 'white', width: 2 }
-        },
-        text: expectedSizes.slice(0, lizPeaks.length).map(s => `${s}bp`),
-        textposition: 'top center'
+      // Buscar el canal del estándar (generalmente channel_4 o channel_5)
+      let lizChannelData = null;
+      for (const [key, channel] of Object.entries(sampleData.channels || {})) {
+        if (channel.color === '#FF0000' || key === 'channel_4' || key === 'channel_5') {
+          lizChannelData = channel;
+          break;
+        }
+      }
+      
+      if (lizChannelData && (lizChannelData.raw_data || lizChannelData.analyzed_data)) {
+        const data = lizChannelData.analyzed_data || lizChannelData.raw_data;
+        traces.push({
+          x: lizPeaks.map(p => p.position),
+          y: lizPeaks.map(p => data[p.position] || 0),
+          type: 'scatter',
+          mode: 'markers+text',
+          name: 'Estándar LIZ',
+          marker: { 
+            color: '#FF0000',
+            size: 12,
+            symbol: 'diamond',
+            line: { color: 'white', width: 2 }
+          },
+          text: lizPeaks.map((p, i) => 
+            expectedSizes[i] ? `${expectedSizes[i]} bp` : `${p.size?.toFixed(1) || '?'} bp`
+          ),
+          textposition: 'top center',
+          textfont: { size: 10, color: '#FF0000' },
+          hovertemplate: 
+            'Estándar LIZ<br>' +
+            'Posición: %{x}<br>' +
+            'Tamaño: %{text}<br>' +
+            'Altura: %{customdata:.0f}<extra></extra>',
+          customdata: lizPeaks.map(p => p.height || 0)
+        });
+      }
+    }
+    
+    // Alelos detectados
+    if (showAlleles && sampleData.alleles) {
+      Object.entries(sampleData.alleles).forEach(([locus, alleleData]) => {
+        if (!alleleData.peaks || alleleData.peaks.length === 0) return;
+        
+        // Encontrar el canal correspondiente a los picos de los alelos
+        let channelData = null;
+        let channelColor = '#00FF00';
+        
+        // Buscar en el canal correspondiente según el marcador STR
+        if (STR_MARKERS[locus]) {
+          const markerInfo = STR_MARKERS[locus];
+          const channelKey = `channel_${markerInfo.channel}`;
+          if (sampleData.channels[channelKey]) {
+            channelData = sampleData.channels[channelKey];
+            channelColor = markerInfo.color;
+          }
+        }
+        
+        // Si no se encontró, usar el primer canal disponible
+        if (!channelData) {
+          for (const [key, channel] of Object.entries(sampleData.channels || {})) {
+            if (channel.raw_data || channel.analyzed_data) {
+              channelData = channel;
+              break;
+            }
+          }
+        }
+        
+        if (!channelData) return;
+        
+        const data = channelData.analyzed_data || channelData.raw_data;
+        if (!data || data.length === 0) return;
+        
+        const allelePeaks = alleleData.peaks.map(p => ({
+          ...p,
+          y: data[p.position] || 0
+        }));
+        
+        traces.push({
+          x: allelePeaks.map(p => p.position),
+          y: allelePeaks.map(p => p.y),
+          type: 'scatter',
+          mode: 'markers+text',
+          name: `Alelos ${locus}`,
+          marker: { 
+            color: channelColor,
+            size: 14,
+            symbol: 'star',
+            line: { color: 'black', width: 2 }
+          },
+          text: allelePeaks.map(p => `${locus}\n${p.size?.toFixed(1) || '?'} bp`),
+          textposition: 'top center',
+          textfont: { size: 11, color: 'black' },
+          hovertemplate: 
+            'Locus: ' + locus + '<br>' +
+            'Tamaño: %{customdata[0]:.1f} bp<br>' +
+            'Posición: %{x}<br>' +
+            'Altura: %{customdata[1]:.0f}<extra></extra>',
+          customdata: allelePeaks.map(p => [p.size || 0, p.height || 0])
+        });
       });
     }
     
@@ -280,7 +430,7 @@ export default function ComprehensiveElectropherogramViewer({ sampleId, onUpdate
       },
       paper_bgcolor: '#fafafa',
       plot_bgcolor: 'white',
-      height: 500,
+      height: 600,
       margin: { t: 50, r: 50, b: 60, l: 80 },
       hovermode: 'closest',
       showlegend: true,
@@ -292,12 +442,14 @@ export default function ComprehensiveElectropherogramViewer({ sampleId, onUpdate
         borderwidth: 1,
         font: { size: 11 }
       },
+      dragmode: 'zoom',
+      selectdirection: 'h',
       annotations: sampleData?.quality_metrics?.overall_quality ? [{
         xref: 'paper',
         yref: 'paper',
         x: 0.02,
         y: 0.98,
-        text: `Calidad: ${sampleData.quality_metrics.overall_quality.toUpperCase()}`,
+        text: `Calidad: ${String(sampleData.quality_metrics.overall_quality).toUpperCase()}`,
         showarrow: false,
         bgcolor: sampleData.quality_metrics.overall_quality === 'excellent' ? '#4caf50' :
                  sampleData.quality_metrics.overall_quality === 'good' ? '#2196f3' :
@@ -412,9 +564,9 @@ export default function ComprehensiveElectropherogramViewer({ sampleId, onUpdate
 
       {/* Panel de Electroferograma */}
       {selectedTab === 0 && (
-        <Box sx={{ p: 3 }}>
+        <Box sx={{ p: 3, maxHeight: 'calc(100vh - 400px)', overflow: 'auto' }}>
           {/* Controles superiores */}
-          <Grid container spacing={2} sx={{ mb: 2 }}>
+          <Grid container spacing={2} sx={{ mb: 2, position: 'sticky', top: 0, bgcolor: 'background.paper', zIndex: 1, pb: 1 }}>
             <Grid item xs={12} md={8}>
               <Grid container spacing={2}>
                 <Grid item xs={6} sm={3}>
@@ -475,6 +627,11 @@ export default function ComprehensiveElectropherogramViewer({ sampleId, onUpdate
                   <ToggleButton value="raw">Datos Crudos</ToggleButton>
                   <ToggleButton value="analyzed">Analizados</ToggleButton>
                 </ToggleButtonGroup>
+                <Tooltip title="Mostrar alelos">
+                  <IconButton onClick={() => setShowAlleles(!showAlleles)} color={showAlleles ? 'primary' : 'default'}>
+                    <Biotech />
+                  </IconButton>
+                </Tooltip>
                 <Tooltip title="Resetear vista">
                   <IconButton onClick={() => { setSelectedMarker(''); setZoomRegion(null); }}>
                     <RestartAlt />
@@ -486,20 +643,40 @@ export default function ComprehensiveElectropherogramViewer({ sampleId, onUpdate
 
           {/* Gráfico principal */}
           <Paper variant="outlined" sx={{ p: 1, mb: 2 }}>
-            <Plot
-              data={prepareTraces()}
-              layout={getLayout()}
-              config={{
-                displayModeBar: true,
-                displaylogo: false,
-                modeBarButtonsToAdd: ['drawrect', 'eraseshape'],
-                toImageButtonOptions: {
-                  format: 'png',
-                  filename: `electropherogram_${sampleData?.metadata?.sample_name}`
-                }
-              }}
-              style={{ width: '100%', height: '500px' }}
-            />
+            {sampleData ? (
+              <Plot
+                data={prepareTraces()}
+                layout={getLayout()}
+                config={{
+                  displayModeBar: true,
+                  displaylogo: false,
+                  modeBarButtonsToAdd: [
+                    'pan2d',
+                    'zoom2d', 
+                    'resetScale2d',
+                    'zoomIn2d',
+                    'zoomOut2d',
+                    'autoScale2d',
+                    'drawrect',
+                    'eraseshape'
+                  ],
+                  modeBarButtonsToRemove: ['select2d', 'lasso2d'],
+                  toImageButtonOptions: {
+                    format: 'png',
+                    filename: `electropherogram_${sampleData?.metadata?.sample_name}`
+                  },
+                  scrollZoom: true
+                }}
+                style={{ width: '100%', height: '600px' }}
+                useResizeHandler={true}
+              />
+            ) : (
+              <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: 600 }}>
+                <Typography variant="h6" color="text.secondary">
+                  No hay datos para mostrar
+                </Typography>
+              </Box>
+            )}
           </Paper>
 
           {/* Control de umbral */}
@@ -528,8 +705,8 @@ export default function ComprehensiveElectropherogramViewer({ sampleId, onUpdate
 
       {/* Panel de Datos de Alelos */}
       {selectedTab === 1 && (
-        <Box sx={{ p: 3 }}>
-          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+        <Box sx={{ p: 3, maxHeight: 'calc(100vh - 400px)', overflow: 'auto' }}>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2, position: 'sticky', top: 0, bgcolor: 'background.paper', zIndex: 1, pb: 1 }}>
             <Typography variant="h6">Alelos Detectados</Typography>
             <Box>
               {editMode ? (
@@ -630,8 +807,10 @@ export default function ComprehensiveElectropherogramViewer({ sampleId, onUpdate
 
       {/* Panel de Análisis Detallado */}
       {selectedTab === 2 && (
-        <Box sx={{ p: 3 }}>
-          <Typography variant="h6" gutterBottom>Análisis Detallado por Canal</Typography>
+        <Box sx={{ p: 3, maxHeight: 'calc(100vh - 400px)', overflow: 'auto' }}>
+          <Typography variant="h6" gutterBottom sx={{ position: 'sticky', top: 0, bgcolor: 'background.paper', zIndex: 1, pb: 1 }}>
+            Análisis Detallado por Canal
+          </Typography>
           
           {sampleData?.channels && Object.entries(sampleData.channels).map(([channelKey, channelData]) => {
             const channelPeaks = sampleData.peaks?.[channelKey] || [];
@@ -718,8 +897,10 @@ export default function ComprehensiveElectropherogramViewer({ sampleId, onUpdate
 
       {/* Panel de Métricas de Calidad */}
       {selectedTab === 3 && (
-        <Box sx={{ p: 3 }}>
-          <Typography variant="h6" gutterBottom>Métricas de Calidad</Typography>
+        <Box sx={{ p: 3, maxHeight: 'calc(100vh - 400px)', overflow: 'auto' }}>
+          <Typography variant="h6" gutterBottom sx={{ position: 'sticky', top: 0, bgcolor: 'background.paper', zIndex: 1, pb: 1 }}>
+            Métricas de Calidad
+          </Typography>
           
           <Grid container spacing={3}>
             <Grid item xs={12} md={4}>
@@ -745,7 +926,7 @@ export default function ComprehensiveElectropherogramViewer({ sampleId, onUpdate
                       />
                       <Box sx={{ position: 'absolute', top: 0, left: 0, bottom: 0, right: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                         <Typography variant="h4" component="div" color="text.secondary">
-                          {sampleData?.quality_metrics?.overall_quality?.toUpperCase() || 'N/A'}
+                          {String(sampleData?.quality_metrics?.overall_quality || 'N/A').toUpperCase()}
                         </Typography>
                       </Box>
                     </Box>
@@ -852,8 +1033,10 @@ export default function ComprehensiveElectropherogramViewer({ sampleId, onUpdate
 
       {/* Panel de Datos Técnicos */}
       {selectedTab === 4 && (
-        <Box sx={{ p: 3 }}>
-          <Typography variant="h6" gutterBottom>Información Técnica Completa</Typography>
+        <Box sx={{ p: 3, maxHeight: 'calc(100vh - 400px)', overflow: 'auto' }}>
+          <Typography variant="h6" gutterBottom sx={{ position: 'sticky', top: 0, bgcolor: 'background.paper', zIndex: 1, pb: 1 }}>
+            Información Técnica Completa
+          </Typography>
           
           <Grid container spacing={3}>
             {/* Metadatos del archivo */}

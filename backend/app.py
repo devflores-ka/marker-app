@@ -273,6 +273,54 @@ async def get_project(project_id: str):
         }
     }
 
+@app.get("/api/projects/{project_id}/allele_matrix")
+async def get_project_allele_matrix(project_id: str):
+    """Obtener matriz de alelos del proyecto"""
+    try:
+        if project_id not in projects:
+            raise HTTPException(404, "Proyecto no encontrado")
+        
+        project = projects[project_id]
+        project_samples = [s for s in samples.values() if s.get("project_id") == project_id]
+        
+        # Construir matriz de alelos
+        allele_matrix = {
+            "project_id": project_id,
+            "project_name": project.get("name"),
+            "samples": [],
+            "markers": [],
+            "generated_at": datetime.now().isoformat()
+        }
+        
+        # Obtener todos los marcadores únicos
+        all_markers = set()
+        sample_alleles = {}
+        
+        for sample in project_samples:
+            sample_id = sample["id"]
+            if sample_id in analysis_cache:
+                analysis = analysis_cache[sample_id]
+                alleles = analysis.get("alleles", {})
+                sample_alleles[sample_id] = {
+                    "sample_name": sample.get("filename", sample_id),
+                    "alleles": alleles
+                }
+                all_markers.update(alleles.keys())
+        
+        allele_matrix["markers"] = sorted(list(all_markers))
+        allele_matrix["samples"] = list(sample_alleles.values())
+        
+        return {
+            "success": True,
+            "matrix": allele_matrix
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error generando matriz de alelos: {str(e)}")
+        raise HTTPException(500, f"Error al generar matriz: {str(e)}")
+
 @app.post("/api/projects/{project_id}/samples/upload")
 async def upload_samples(
     project_id: str,
@@ -366,6 +414,21 @@ async def process_single_file(file: UploadFile, project_id: str) -> Dict:
                 "error": analysis_result.get("error", "Error desconocido en el análisis")
             }
         
+        # IMPORTANTE: Asegurarse de que trace_data esté en el resultado
+        # Si el parser no lo incluye, intentar extraerlo
+        if "trace_data" not in analysis_result and "raw_data" in analysis_result:
+            analysis_result["trace_data"] = analysis_result["raw_data"]
+        
+        # Si aún no tenemos trace_data, intentar extraerlo de los canales
+        if "trace_data" not in analysis_result:
+            trace_data = {}
+            channels = analysis_result.get("channels", {})
+            for channel_key, channel_info in channels.items():
+                if "raw_data" in channel_info:
+                    trace_data[channel_key] = channel_info["raw_data"]
+            if trace_data:
+                analysis_result["trace_data"] = trace_data
+        
         # Crear registro de muestra con estructura correcta
         sample_id = str(uuid.uuid4())
         sample = {
@@ -425,24 +488,67 @@ async def get_sample_details(sample_id: str):
     
     sample = samples[sample_id].copy()
     
-    # Agregar datos completos del análisis FSA
+    # IMPORTANTE: El frontend espera que la respuesta tenga una propiedad 'analysis'
     if sample_id in analysis_cache:
-        fsa_data = analysis_cache[sample_id]
-        sample["fsa_data"] = {
-            "channels": fsa_data.get("channels", {}),
-            "alleles": fsa_data.get("alleles", {}),
-            "peaks": fsa_data.get("peaks", {}),
-            "quality_metrics": fsa_data.get("quality_metrics", {}),
-            "size_standard": fsa_data.get("size_standard", {}),
-            "str_markers": fsa_data.get("str_markers", {})
+        analysis_data = analysis_cache[sample_id]
+        
+        # Crear estructura que el frontend espera
+        analysis = {
+            "channels": analysis_data.get("channels", {}),
+            "alleles": analysis_data.get("alleles", {}),
+            "peaks": analysis_data.get("peaks", {}),
+            "quality_metrics": analysis_data.get("quality_metrics", {}),
+            "size_standard": analysis_data.get("size_standard", {}),
+            "str_markers": analysis_data.get("str_markers", {}),
+            "metadata": analysis_data.get("metadata", {}),
+            "filename": sample.get("filename", "")
         }
+        
+        # También mantener fsa_data para compatibilidad
+        sample["fsa_data"] = analysis
     else:
+        analysis = {
+            "channels": {},
+            "alleles": {},
+            "peaks": {},
+            "quality_metrics": {},
+            "size_standard": {},
+            "metadata": {},
+            "filename": sample.get("filename", "")
+        }
         sample["fsa_data"] = None
     
+    # LA CLAVE: El frontend hace setSampleData(data.analysis)
+    # Así que debemos retornar la estructura correcta
     return {
         "success": True,
-        "sample": sample
+        "sample": sample,
+        "analysis": analysis  # Esta es la línea crítica
     }
+
+@app.get("/api/debug/sample/{sample_id}")
+async def debug_sample_data(sample_id: str):
+    """Endpoint para debugging - ver estructura completa de datos"""
+    data = {
+        "sample_exists": sample_id in samples,
+        "analysis_exists": sample_id in analysis_cache,
+        "sample_data": samples.get(sample_id, {}),
+        "analysis_keys": list(analysis_cache.get(sample_id, {}).keys()) if sample_id in analysis_cache else [],
+        "analysis_preview": {}
+    }
+    
+    if sample_id in analysis_cache:
+        analysis = analysis_cache[sample_id]
+        data["analysis_preview"] = {
+            "has_channels": "channels" in analysis,
+            "has_alleles": "alleles" in analysis,
+            "has_peaks": "peaks" in analysis,
+            "channels_count": len(analysis.get("channels", {})),
+            "alleles_count": len(analysis.get("alleles", {})),
+            "peaks_count": len(analysis.get("peaks", {}))
+        }
+    
+    return data
 
 @app.put("/api/samples/{sample_id}/alleles")
 async def update_sample_alleles(sample_id: str, alleles: Dict[str, Dict]):
@@ -787,7 +893,7 @@ async def delete_sample(sample_id: str):
             del analysis_cache[sample_id]
         
         autosave()
-        
+
         return {
             "success": True,
             "message": "Muestra eliminada exitosamente"
@@ -798,6 +904,122 @@ async def delete_sample(sample_id: str):
     except Exception as e:
         print(f"Error eliminando muestra: {str(e)}")
         raise HTTPException(500, f"Error al eliminar muestra: {str(e)}")
+    
+@app.get("/api/samples/{sample_id}/channel/{channel_key}")
+async def get_channel_data(sample_id: str, channel_key: str):
+    """Obtener datos crudos y analizados de un canal específico"""
+    try:
+        if sample_id not in analysis_cache:
+            raise HTTPException(404, "Muestra no encontrada")
+        
+        analysis = analysis_cache[sample_id]
+        channels = analysis.get("channels", {})
+        
+        if channel_key not in channels:
+            raise HTTPException(404, f"Canal {channel_key} no encontrado")
+        
+        channel_info = channels[channel_key]
+        
+        # Construir respuesta con los datos del canal
+        response = {
+            "success": True,
+            "channel": channel_key,
+            "info": channel_info,
+            "raw_data": None,
+            "analyzed_data": None
+        }
+        
+        # Obtener datos crudos si están disponibles
+        if channel_info.get("has_raw_data", False):
+            # Los datos crudos deberían estar en el análisis
+            # Buscar en diferentes posibles ubicaciones
+            raw_data = None
+            
+            # Opción 1: Directamente en el canal
+            if "raw_data" in channel_info:
+                raw_data = channel_info["raw_data"]
+            
+            # Opción 2: En una estructura separada de raw_data
+            elif "raw_data" in analysis:
+                raw_data = analysis["raw_data"].get(channel_key)
+            
+            # Opción 3: En la estructura de datos del parser FSA
+            # El parser guarda los datos en analysis["trace_data"]
+            elif "trace_data" in analysis:
+                # Mapear el número del canal
+                channel_num = int(channel_key.split('_')[1])
+                raw_data = analysis["trace_data"].get(f"channel_{channel_num}", [])
+            
+            response["raw_data"] = raw_data
+        
+        # Obtener datos analizados si están disponibles
+        if channel_info.get("has_analyzed_data", False):
+            analyzed_data = None
+            
+            # Opción 1: Directamente en el canal
+            if "analyzed_data" in channel_info:
+                analyzed_data = channel_info["analyzed_data"]
+            
+            # Opción 2: En una estructura separada
+            elif "analyzed_data" in analysis:
+                analyzed_data = analysis["analyzed_data"].get(channel_key)
+            
+            response["analyzed_data"] = analyzed_data
+        
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error obteniendo datos del canal: {str(e)}")
+        raise HTTPException(500, f"Error al obtener datos del canal: {str(e)}")
+
+@app.get("/api/samples/{sample_id}/raw_data")
+async def get_all_raw_data(sample_id: str):
+    """Obtener todos los datos crudos de una muestra"""
+    try:
+        if sample_id not in analysis_cache:
+            raise HTTPException(404, "Muestra no encontrada")
+        
+        analysis = analysis_cache[sample_id]
+        channels = analysis.get("channels", {})
+        
+        # Construir respuesta con todos los datos
+        all_data = {}
+        
+        for channel_key, channel_info in channels.items():
+            channel_data = {
+                "info": channel_info,
+                "raw_data": None,
+                "analyzed_data": None
+            }
+            
+            # Buscar datos crudos
+            if channel_info.get("has_raw_data", False):
+                # Intentar diferentes ubicaciones
+                if "trace_data" in analysis:
+                    channel_num = int(channel_key.split('_')[1])
+                    channel_data["raw_data"] = analysis["trace_data"].get(f"channel_{channel_num}", [])
+                elif "raw_data" in channel_info:
+                    channel_data["raw_data"] = channel_info["raw_data"]
+            
+            # Buscar datos analizados
+            if channel_info.get("has_analyzed_data", False) and "analyzed_data" in channel_info:
+                channel_data["analyzed_data"] = channel_info["analyzed_data"]
+            
+            all_data[channel_key] = channel_data
+        
+        return {
+            "success": True,
+            "sample_id": sample_id,
+            "channels": all_data
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error obteniendo datos crudos: {str(e)}")
+        raise HTTPException(500, f"Error al obtener datos: {str(e)}")
     
 @app.post("/api/admin/save")
 async def save_data_endpoint():
