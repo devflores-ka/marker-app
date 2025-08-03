@@ -414,20 +414,39 @@ async def process_single_file(file: UploadFile, project_id: str) -> Dict:
                 "error": analysis_result.get("error", "Error desconocido en el análisis")
             }
         
-        # IMPORTANTE: Asegurarse de que trace_data esté en el resultado
-        # Si el parser no lo incluye, intentar extraerlo
-        if "trace_data" not in analysis_result and "raw_data" in analysis_result:
-            analysis_result["trace_data"] = analysis_result["raw_data"]
+        # IMPORTANTE: Asegurar que los datos raw estén en los canales
+        if "channels" in analysis_result and "trace_data" in analysis_result:
+            trace_data = analysis_result["trace_data"]
+            
+            # Copiar trace_data a los canales correspondientes
+            for channel_key, channel_info in analysis_result["channels"].items():
+                channel_num = int(channel_key.split('_')[1])
+                trace_key = f'channel_{channel_num}'
+                
+                # Si no tiene raw_data pero existe en trace_data, copiarlo
+                if trace_key in trace_data and not channel_info.get("raw_data"):
+                    channel_info["raw_data"] = trace_data[trace_key]
+                    print(f"Copiando trace_data a {channel_key}: {len(trace_data[trace_key])} puntos")
         
-        # Si aún no tenemos trace_data, intentar extraerlo de los canales
-        if "trace_data" not in analysis_result:
-            trace_data = {}
-            channels = analysis_result.get("channels", {})
-            for channel_key, channel_info in channels.items():
-                if "raw_data" in channel_info:
-                    trace_data[channel_key] = channel_info["raw_data"]
-            if trace_data:
-                analysis_result["trace_data"] = trace_data
+        # También intentar buscar en raw_data si existe
+        elif "raw_data" in analysis_result and "channels" in analysis_result:
+            raw_data = analysis_result["raw_data"]
+            for channel_key, channel_info in analysis_result["channels"].items():
+                if channel_key in raw_data and not channel_info.get("raw_data"):
+                    channel_info["raw_data"] = raw_data[channel_key]
+        
+        # Convertir numpy arrays a listas para JSON
+        def convert_numpy_to_list(obj):
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, dict):
+                return {k: convert_numpy_to_list(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_numpy_to_list(item) for item in obj]
+            return obj
+        
+        # Aplicar conversión a todo el resultado
+        analysis_result = convert_numpy_to_list(analysis_result)
         
         # Crear registro de muestra con estructura correcta
         sample_id = str(uuid.uuid4())
@@ -443,7 +462,7 @@ async def process_single_file(file: UploadFile, project_id: str) -> Dict:
                 "quality_score": analysis_result.get("quality_metrics", {}).get("overall_quality", 0),
                 "channels": len([
                     ch for ch in analysis_result.get("channels", {}).values()
-                    if ch.get("has_raw_data", False)
+                    if ch.get("has_raw_data", False) or ch.get("raw_data")
                 ])
             },
             "quality": analysis_result.get("quality_metrics", {}).get("overall_quality", 0),
@@ -455,10 +474,22 @@ async def process_single_file(file: UploadFile, project_id: str) -> Dict:
         samples[sample_id] = sample
         analysis_cache[sample_id] = analysis_result
         
+        # Log para debugging
+        print(f"Archivo {file.filename} procesado:")
+        print(f"  - Canales: {len(analysis_result.get('channels', {}))}")
+        print(f"  - Tiene trace_data: {'trace_data' in analysis_result}")
+        if 'channels' in analysis_result:
+            for ch_key, ch_data in analysis_result['channels'].items():
+                has_raw = 'raw_data' in ch_data and ch_data['raw_data'] is not None
+                raw_len = len(ch_data['raw_data']) if has_raw and isinstance(ch_data['raw_data'], list) else 0
+                print(f"  - {ch_key}: raw_data={has_raw}, length={raw_len}")
+        
         # Actualizar proyecto
         if project_id in projects:
             if sample_id not in projects[project_id]["samples"]:
                 projects[project_id]["samples"].append(sample_id)
+        
+        autosave()
         
         return {
             "success": True,
@@ -525,6 +556,138 @@ async def get_sample_details(sample_id: str):
         "sample": sample,
         "analysis": analysis  # Esta es la línea crítica
     }
+
+@app.get("/api/samples/{sample_id}/channels")
+async def get_sample_channels(sample_id: str):
+    """
+    Obtener los datos completos de todos los canales
+    """
+    try:
+        if sample_id not in analysis_cache:
+            raise HTTPException(404, "Muestra no encontrada")
+        
+        analysis = analysis_cache[sample_id]
+        
+        # Log para debugging
+        print(f"Loading channels for sample {sample_id}")
+        
+        # Preparar los datos de los canales
+        channels_data = {}
+        
+        if 'channels' in analysis:
+            for channel_key, channel_info in analysis['channels'].items():
+                # Verificar si hay datos raw
+                raw_data = []
+                analyzed_data = []
+                
+                # Buscar datos raw en diferentes ubicaciones
+                if 'raw_data' in channel_info and channel_info['raw_data'] is not None:
+                    raw_data = channel_info['raw_data']
+                elif 'trace_data' in analysis:
+                    # El parser puede guardar los datos en trace_data
+                    channel_num = int(channel_key.split('_')[1])
+                    trace_key = f'channel_{channel_num}'
+                    if trace_key in analysis['trace_data']:
+                        raw_data = analysis['trace_data'][trace_key]
+                
+                # Buscar datos analizados
+                if 'analyzed_data' in channel_info and channel_info['analyzed_data'] is not None:
+                    analyzed_data = channel_info['analyzed_data']
+                
+                # Log para debugging
+                print(f"Channel {channel_key}: raw_data length = {len(raw_data) if isinstance(raw_data, list) else 0}")
+                
+                channels_data[channel_key] = {
+                    'info': {
+                        'dye_name': channel_info.get('dye_name', 'Unknown'),
+                        'color': channel_info.get('color', 'unknown'),
+                        'wavelength': channel_info.get('wavelength', 'unknown'),
+                        'data_points': channel_info.get('data_points', 0),
+                        'has_raw_data': len(raw_data) > 0 if isinstance(raw_data, list) else False,
+                        'has_analyzed_data': len(analyzed_data) > 0 if isinstance(analyzed_data, list) else False,
+                        'peak_count': len(channel_info.get('peaks', [])) if 'peaks' in channel_info else 0
+                    },
+                    # IMPORTANTE: Incluir los datos crudos y analizados
+                    'raw_data': raw_data if isinstance(raw_data, list) else [],
+                    'analyzed_data': analyzed_data if isinstance(analyzed_data, list) else []
+                }
+        
+        return {
+            'success': True,
+            'sample_id': sample_id,
+            'channels': channels_data
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting channels data: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(500, f"Error al obtener datos de canales: {str(e)}")
+
+
+@app.get("/api/samples/{sample_id}/debug")
+async def debug_sample_data(sample_id: str):
+    """
+    Endpoint de debugging para verificar los datos guardados
+    """
+    try:
+        if sample_id not in samples:
+            raise HTTPException(404, "Sample not found")
+        
+        analysis = analysis_cache.get(sample_id, {})
+        
+        debug_info = {
+            'sample_id': sample_id,
+            'filename': samples[sample_id].get('filename', 'Unknown'),
+            'has_analysis': sample_id in analysis_cache,
+            'channels_info': {}
+        }
+        
+        if 'channels' in analysis:
+            for channel_key, channel_data in analysis['channels'].items():
+                raw_data = None
+                analyzed_data = None
+                
+                # Buscar raw data
+                if 'raw_data' in channel_data:
+                    raw_data = channel_data['raw_data']
+                elif 'trace_data' in analysis:
+                    channel_num = int(channel_key.split('_')[1])
+                    trace_key = f'channel_{channel_num}'
+                    if trace_key in analysis['trace_data']:
+                        raw_data = analysis['trace_data'][trace_key]
+                
+                # Buscar analyzed data
+                if 'analyzed_data' in channel_data:
+                    analyzed_data = channel_data['analyzed_data']
+                
+                debug_info['channels_info'][channel_key] = {
+                    'has_raw_data': raw_data is not None,
+                    'raw_data_length': len(raw_data) if raw_data and isinstance(raw_data, (list, np.ndarray)) else 0,
+                    'raw_data_type': type(raw_data).__name__ if raw_data is not None else 'None',
+                    'raw_data_sample': raw_data[:10] if raw_data and isinstance(raw_data, (list, np.ndarray)) and len(raw_data) > 0 else None,
+                    'has_analyzed_data': analyzed_data is not None,
+                    'analyzed_data_length': len(analyzed_data) if analyzed_data and isinstance(analyzed_data, (list, np.ndarray)) else 0,
+                    'dye_name': channel_data.get('dye_name'),
+                    'color': channel_data.get('color'),
+                    'data_points': channel_data.get('data_points')
+                }
+        
+        # También verificar trace_data
+        if 'trace_data' in analysis:
+            debug_info['has_trace_data'] = True
+            debug_info['trace_data_keys'] = list(analysis['trace_data'].keys())
+        else:
+            debug_info['has_trace_data'] = False
+            
+        return debug_info
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Debug error: {str(e)}")
+        return {'error': str(e)}
 
 @app.get("/api/debug/sample/{sample_id}")
 async def debug_sample_data(sample_id: str):
