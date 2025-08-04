@@ -1,11 +1,5 @@
-# Node.js
 node_modules/
-
-# Python
-backend/__pycache__/
-backend/core/__pycache__/
-*.py[cod]
-
-# Archivos específicos generados
+backend/__pycache__
+backend/core/__pycache__
 .dev
 backend/dev_data/
