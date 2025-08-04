@@ -2,7 +2,8 @@
 node_modules/
 
 # Python
-**/__pycache__/
+backend/__pycache__/
+backend/core/__pycache__/
 *.py[cod]
 
 # Archivos específicos generados
