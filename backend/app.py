@@ -18,14 +18,27 @@ import os
 import pickle
 from pathlib import Path
 
+# Determinar entorno automáticamente
+IS_DEV = os.getenv("GENOTYPER_DEV", "0") == "1"
+
+# También detectar por archivo local
+if Path(".dev").exists():
+    IS_DEV = True
+
 # Directorio para persistencia
-DATA_DIR = Path("./genotyper_data")
-DATA_DIR.mkdir(exist_ok=True)
+DATA_DIR = Path("./dev_data" if IS_DEV else "./genotyper_data")
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # Archivos de persistencia
 PROJECTS_FILE = DATA_DIR / "projects.json"
 SAMPLES_FILE = DATA_DIR / "samples.json"
 CACHE_FILE = DATA_DIR / "analysis_cache.pkl"
+
+# Inicializar archivos vacíos si no existen
+for file_path in [PROJECTS_FILE, SAMPLES_FILE]:
+    if not file_path.exists():
+        with open(file_path, "w") as f:
+            json.dump([], f)  # Estructura base vacía
 
 def load_data():
     """Cargar datos persistidos"""
@@ -74,7 +87,7 @@ def save_data():
     except Exception as e:
         print(f"❌ Error guardando datos: {e}")
 
-# Importar el parser mejorado
+# Importar el parser
 try:
     from backend.core.fsa_parser import FSAParser
     PARSER_AVAILABLE = True
