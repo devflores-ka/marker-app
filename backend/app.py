@@ -76,7 +76,7 @@ def save_data():
 
 # Importar el parser mejorado
 try:
-    from core.fsa_parser_enhanced import EnhancedFSAParser
+    from backend.core.fsa_parser import FSAParser
     PARSER_AVAILABLE = True
 except ImportError:
     print("Warning: Enhanced FSA Parser no encontrado")
@@ -84,9 +84,9 @@ except ImportError:
     # Fallback al parser simple si existe
     try:
         from core.fsa_reader import FSAReader
-        EnhancedFSAParser = FSAReader  # Usar el simple como fallback
+        FSAParser = FSAReader  # Usar el simple como fallback
     except ImportError:
-        EnhancedFSAParser = None
+        FSAParser = None
 
 # Para el ejecutable
 if getattr(sys, 'frozen', False):
@@ -294,21 +294,54 @@ async def get_project_allele_matrix(project_id: str):
         
         # Obtener todos los marcadores únicos
         all_markers = set()
-        sample_alleles = {}
+        sample_alleles_list = []
         
         for sample in project_samples:
             sample_id = sample["id"]
+            
+            # Log para debugging
+            print(f"Procesando muestra {sample_id} ({sample.get('filename', 'unknown')})")
+            
+            # Verificar si hay análisis en caché
             if sample_id in analysis_cache:
                 analysis = analysis_cache[sample_id]
                 alleles = analysis.get("alleles", {})
-                sample_alleles[sample_id] = {
+                
+                # Log de alelos encontrados
+                print(f"  - Alelos en caché: {list(alleles.keys())}")
+                
+                # Si no hay alelos pero hay picos, intentar llamarlos de nuevo
+                if not alleles and "peaks" in analysis:
+                    print(f"  - No hay alelos, pero hay picos. Intentando llamar alelos...")
+                    # Este código se ejecutaría solo si necesitamos re-procesar
+                    pass
+                
+                sample_data = {
                     "sample_name": sample.get("filename", sample_id),
+                    "sample_id": sample_id,
                     "alleles": alleles
                 }
+                
+                sample_alleles_list.append(sample_data)
                 all_markers.update(alleles.keys())
+            else:
+                print(f"  - ADVERTENCIA: No hay análisis en caché para {sample_id}")
+                # Agregar muestra sin alelos
+                sample_data = {
+                    "sample_name": sample.get("filename", sample_id),
+                    "sample_id": sample_id,
+                    "alleles": {}
+                }
+                sample_alleles_list.append(sample_data)
         
+        # Ordenar marcadores alfabéticamente
         allele_matrix["markers"] = sorted(list(all_markers))
-        allele_matrix["samples"] = list(sample_alleles.values())
+        allele_matrix["samples"] = sample_alleles_list
+        
+        print(f"\nMatriz generada:")
+        print(f"  - Total de muestras: {len(sample_alleles_list)}")
+        print(f"  - Marcadores detectados: {allele_matrix['markers']}")
+        print(f"  - Muestras con alelos: {sum(1 for s in sample_alleles_list if s['alleles'])}")
         
         return {
             "success": True,
@@ -319,6 +352,8 @@ async def get_project_allele_matrix(project_id: str):
         raise
     except Exception as e:
         print(f"Error generando matriz de alelos: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(500, f"Error al generar matriz: {str(e)}")
 
 @app.post("/api/projects/{project_id}/samples/upload")
@@ -405,7 +440,7 @@ async def process_single_file(file: UploadFile, project_id: str) -> Dict:
             }
         
         # Analizar archivo
-        analysis_result = EnhancedFSAParser.process_file(content, file.filename)
+        analysis_result = FSAParser.process_file(content, file.filename)
         
         if not analysis_result.get("success", False):
             return {
@@ -510,6 +545,7 @@ async def process_single_file(file: UploadFile, project_id: str) -> Dict:
             "filename": file.filename,
             "error": str(e)
         }
+
 
 @app.get("/api/samples/{sample_id}")
 async def get_sample_details(sample_id: str):

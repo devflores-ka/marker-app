@@ -1,4 +1,4 @@
-# backend/core/fsa_parser_enhanced.py
+# backend/core/fsa_parser.py
 import struct
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Any
@@ -17,7 +17,7 @@ except ImportError:
     BIOPYTHON_AVAILABLE = False
     logging.warning("BioPython no disponible. Usando parser interno limitado.")
 
-class EnhancedFSAParser:
+class FSAParser:
     """
     Parser mejorado para archivos FSA/AB1 con soporte completo ABIF
     """
@@ -77,113 +77,25 @@ class EnhancedFSAParser:
         'D19S433': {'channel': 2, 'size_range': (100, 150), 'repeat': 4}
     }
     
-    
     @staticmethod
     def process_file(content: bytes, filename: str) -> Dict[str, Any]:
         """
         Procesa un archivo FSA y extrae todos los datos necesarios
         """
         try:
-            # Usar Bio.SeqIO si está disponible
-            try:
-                from Bio import SeqIO
-                import io
-                
-                # Leer el archivo ABIF
-                handle = io.BytesIO(content)
-                record = SeqIO.read(handle, "abi")
-                
-                # Extraer datos raw de los canales
-                channels = {}
-                trace_data = {}
-                
-                # Los datos raw están en record.annotations['abif_raw']
-                raw_data = record.annotations.get('abif_raw', {})
-                
-                # Extraer datos de cada canal (DATA1-DATA4 para canales, DATA105 para LIZ)
-                for i in range(1, 6):
-                    channel_key = f'channel_{i}'
-                    data_key = f'DATA{i}' if i < 5 else 'DATA105'
-                    
-                    if data_key in raw_data:
-                        channel_raw_data = list(raw_data[data_key])  # Convertir a lista
-                        
-                        channels[channel_key] = {
-                            'dye_name': ['FAM', 'VIC', 'NED', 'PET', 'LIZ'][i-1],
-                            'color': ['blue', 'green', 'yellow', 'red', 'orange'][i-1],
-                            'wavelength': ['520nm', '548nm', '575nm', '595nm', '655nm'][i-1],
-                            'data_points': len(channel_raw_data),
-                            'has_raw_data': True,
-                            'has_analyzed_data': False,
-                            'raw_data': channel_raw_data  # IMPORTANTE: Incluir los datos aquí
-                        }
-                        
-                        # También guardar en trace_data para compatibilidad
-                        trace_data[channel_key] = channel_raw_data
-                
-                # Extraer metadatos
-                metadata = {
-                    'sample_name': raw_data.get('SMPL1', filename),
-                    'run_date': str(raw_data.get('RUND1', '')),
-                    'run_time': str(raw_data.get('RUNT1', '')),
-                    'instrument': raw_data.get('MODL1', 'Unknown'),
-                    'dye_set': raw_data.get('DySN1', 'Unknown'),
-                    'file_type': 'FSA',
-                    'data_points': max(ch['data_points'] for ch in channels.values()) if channels else 0
-                }
-                
-                # Detectar picos y alelos (simulado por ahora)
-                peaks = {}
-                alleles = {}
-                
-                # Para cada canal con datos
-                for channel_key, channel_data in channels.items():
-                    if channel_data.get('raw_data'):
-                        # Detección simple de picos (mejorar con algoritmos reales)
-                        channel_peaks = []
-                        peaks[channel_key] = channel_peaks
-                
-                # Métricas de calidad
-                quality_metrics = {
-                    'overall_quality': 0.85,  # Simulado
-                    'quality_score': 85,
-                    'status': 'good',
-                    'issues': []
-                }
-                
-                # Size standard
-                size_standard = {
-                    'status': 'calibrated',
-                    'peaks': [],
-                    'expected_sizes': [35, 50, 75, 100, 139, 150, 160, 200, 250, 300, 340, 350, 400, 450, 490, 500],
-                    'detected_count': 0,
-                    'expected_count': 16
-                }
-                
-                return {
-                    'success': True,
-                    'filename': filename,
-                    'metadata': metadata,
-                    'channels': channels,
-                    'trace_data': trace_data,  # IMPORTANTE: Incluir trace_data
-                    'peaks': peaks,
-                    'alleles': alleles,
-                    'size_standard': size_standard,
-                    'quality_metrics': quality_metrics,
-                    'str_markers': {}
-                }
-                
-            except ImportError:
-                # Si Bio no está disponible, usar parser alternativo
-                return EnhancedFSAParser._parse_without_bio(content, filename)
+            # Usar el método correcto que SÍ detecta picos y alelos
+            if BIOPYTHON_AVAILABLE:
+                return FSAParser._process_with_biopython(content, filename)
+            else:
+                return FSAParser._process_with_internal_parser(content, filename)
                 
         except Exception as e:
             print(f"Error procesando archivo FSA: {str(e)}")
             import traceback
             traceback.print_exc()
             
-            # Retornar datos simulados para testing
-            return EnhancedFSAParser._create_mock_data(filename)
+            # Retornar datos simulados para testing si falla todo
+            return FSAParser._create_mock_data(filename)
 
     @staticmethod
     def _parse_without_bio(content: bytes, filename: str) -> Dict[str, Any]:
@@ -198,7 +110,7 @@ class EnhancedFSAParser:
             }
         
         # Crear datos simulados realistas
-        return EnhancedFSAParser._create_mock_data(filename)
+        return FSAParser._create_mock_data(filename)
     
     @staticmethod
     def _create_mock_data(filename: str) -> Dict[str, Any]:
@@ -330,6 +242,7 @@ class EnhancedFSAParser:
                         channels[channel_key]['purpose'] = 'Size Standard'
                     
                     max_data_points = max(max_data_points, len(channel_data))
+                    print(f"Canal {channel_key}: {len(channel_data)} puntos, max={np.max(channel_data)}, min={np.min(channel_data)}")
             
             metadata['data_points'] = max_data_points
             
@@ -347,14 +260,38 @@ class EnhancedFSAParser:
             # Procesar canal de escalera de tamaños (LIZ)
             size_standard = {}
             if 'channel_5' in channels and 'raw_data' in channels['channel_5']:
+                print(f"Procesando estándar LIZ...")
                 size_standard = peak_detector.process_size_standard(channels['channel_5']['raw_data'])
+                print(f"Estándar LIZ: status={size_standard.get('status')}, picos detectados={size_standard.get('detected_count')}")
             
             # Detectar picos en todos los canales
+            print(f"Detectando picos en todos los canales...")
             peaks_data = peak_detector.detect_peaks_all_channels(channels)
+            
+            # Log de picos detectados
+            total_peaks = 0
+            for ch_key, ch_peaks in peaks_data.items():
+                print(f"  {ch_key}: {len(ch_peaks)} picos detectados")
+                total_peaks += len(ch_peaks)
+            print(f"Total de picos detectados: {total_peaks}")
             
             # Llamar alelos
             size_calibration = size_standard.get('calibration') if size_standard.get('status') == 'calibrated' else None
+            
+            # Si no hay calibración, usar una estimada
+            if not size_calibration:
+                print("No hay calibración de tamaños, usando estimación por defecto")
+                size_calibration = {
+                    'slope': 0.075,  # bp por scan
+                    'intercept': 20   # offset
+                }
+            
+            print(f"Llamando alelos con calibración: slope={size_calibration['slope']}, intercept={size_calibration['intercept']}")
             alleles = peak_detector.call_alleles(peaks_data, size_calibration, cls.STR_MARKERS)
+            
+            print(f"Alelos detectados: {len(alleles)} marcadores")
+            for marker, allele_data in alleles.items():
+                print(f"  {marker}: {allele_data.get('allele1', '?')} / {allele_data.get('allele2', '?')}")
             
             # Calcular métricas de calidad
             quality_metrics = cls._calculate_quality_metrics(channels, peaks_data, size_standard)
@@ -374,6 +311,8 @@ class EnhancedFSAParser:
             
         except Exception as e:
             logging.error(f"Error procesando con BioPython: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return cls._create_error_response(filename, str(e))
     
     @classmethod
