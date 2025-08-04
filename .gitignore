@@ -4,3 +4,4 @@ backend/__pycache__
 backend/core/__pycache__
 .dev
 backend/dev_data/
+backend/genotyper_data/analysis_cache.pkl
